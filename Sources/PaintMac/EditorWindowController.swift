@@ -132,6 +132,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         window.center()
         window.setFrameAutosaveName("PaintMacEditor")
         document.onChange = { [weak self] in self?.refresh() }
+        document.onHistoryNotice = { [weak self] in self?.status.stringValue = $0 }
         canvas.onToolChange = { [weak self] in self?.selectTool($0) }
         canvas.onColorPick = { [weak self] color, alternate in self?.setColor(color, alternate: alternate) }
         canvas.onSwapColors = { [weak self] in self?.swapColors() }
@@ -1063,11 +1064,14 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         guard paintDocument.state.layers.count < 32 else { throw PaintError.tooManyLayers }
         var placed = Raster(width: paintDocument.state.width, height: paintDocument.state.height)
         let dx = max(0, (placed.width - raster.width) / 2), dy = max(0, (placed.height - raster.height) / 2)
+        let sourceBytes = raster.bytes
+        var placedBytes = placed.bytes
         for y in 0..<min(raster.height, placed.height) {
             let length = min(raster.width, placed.width) * 4
             let start = ((y + dy) * placed.width + dx) * 4
-            placed.bytes.replaceSubrange(start..<start + length, with: raster.bytes[y * raster.width * 4..<y * raster.width * 4 + length])
+            placedBytes.replaceSubrange(start..<start + length, with: sourceBytes[y * raster.width * 4..<y * raster.width * 4 + length])
         }
+        placed.bytes = placedBytes
         paintDocument.edit("Import Layer") { state in
             let layer = PaintLayer(name: name, raster: placed)
             state.insertLayer(layer)

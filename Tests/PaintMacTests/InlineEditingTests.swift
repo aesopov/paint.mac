@@ -140,7 +140,8 @@ final class InlineEditingTests: XCTestCase {
         let painted = doc.state.activeLayer.raster
         let ink = bounds(of: painted)
         XCTAssertFalse(ink.isNull); XCTAssertTrue(box.contains(ink))
-        XCTAssertTrue(stride(from: 3, to: painted.bytes.count, by: 4).allSatisfy { painted.bytes[$0] == 0 || painted.bytes[$0] == 255 })
+        let paintedBytes = painted.bytes
+        XCTAssertTrue(stride(from: 3, to: paintedBytes.count, by: 4).allSatisfy { paintedBytes[$0] == 0 || paintedBytes[$0] == 255 })
         doc.undoManager?.undo(); XCTAssertEqual(doc.state.activeLayer.raster, Raster(width: 400, height: 300))
         doc.undoManager?.redo(); XCTAssertEqual(doc.state.activeLayer.raster, painted)
         canvas.beginText(in: box, color: .black)

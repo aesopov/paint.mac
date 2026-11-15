@@ -6,7 +6,7 @@ final class SoftBrushTests: XCTestCase {
     private let blue = PixelColor(r: 30, g: 90, b: 230)
     private let red = PixelColor(r: 230, g: 40, b: 20)
     private func alpha(_ raster: Raster, _ x: Int, _ y: Int) -> Int { Int(raster.pixel(x: x, y: y).a) }
-    private func alphas(_ raster: Raster) -> [UInt8] { stride(from: 3, to: raster.bytes.count, by: 4).map { raster.bytes[$0] } }
+    private func alphas(_ raster: Raster) -> [UInt8] { { let pixels = raster.bytes; return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] } }() }
     func testRadialFalloffHasOpaqueCoreAndMonotonicSymmetricEdgesEvenInSharpMode() {
         for smooth in [false, true] {
             var soft = Raster(width: 90, height: 90), medium = soft, hard = soft
@@ -84,14 +84,16 @@ final class SoftBrushTests: XCTestCase {
             var oldH = Raster(width: 256, height: 256), oldV = oldH
             oldH.stroke(from: horizontal[0], to: horizontal[1], size: 80, color: .white, opacity: 1, erase: false, clip: nil, antialias: false, hardness: 0)
             oldV.stroke(from: vertical[0], to: vertical[1], size: 80, color: .white, opacity: 1, erase: false, clip: nil, antialias: false, hardness: 0)
+            var beforeBytes = before.bytes, afterBytes = after.bytes
             for y in 0..<256 { for x in 0..<256 {
                 let oldAlpha = Double(max(alpha(oldH, x, y), alpha(oldV, x, y))) / 255
                 let newAlpha = Double(alpha(crossed, x, y)) / 255
                 for (index, value) in [blue.r, blue.g, blue.b].enumerated() {
-                    before.bytes[(y * 256 + x) * 4 + index] = UInt8((Double(value) * oldAlpha + 255 * (1 - oldAlpha)).rounded())
-                    after.bytes[(y * 256 + x) * 4 + index] = UInt8((Double(value) * newAlpha + 255 * (1 - newAlpha)).rounded())
+                    beforeBytes[(y * 256 + x) * 4 + index] = UInt8((Double(value) * oldAlpha + 255 * (1 - oldAlpha)).rounded())
+                    afterBytes[(y * 256 + x) * 4 + index] = UInt8((Double(value) * newAlpha + 255 * (1 - newAlpha)).rounded())
                 }
             } }
+            before.bytes = beforeBytes; after.bytes = afterBytes
             for (name, image) in [("crossing-max.png", before), ("crossing-blended.png", after)] {
                 try ProjectCodec.imageData(image.cgImage, type: "public.png").write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
             }
@@ -143,8 +145,9 @@ final class SoftBrushTests: XCTestCase {
         }
         XCTAssertEqual(alpha(erased, 40, 40), 191); XCTAssertGreaterThan(alpha(erased, 55, 40), 191)
         XCTAssertEqual(erased.pixel(x: 34, y: 34), original.pixel(x: 34, y: 34))
-        for i in stride(from: 0, to: erased.bytes.count, by: 4) {
-            XCTAssertLessThanOrEqual(erased.bytes[i], erased.bytes[i + 3]); XCTAssertLessThanOrEqual(erased.bytes[i + 2], erased.bytes[i + 3])
+        let erasedBytes = erased.bytes
+        for i in stride(from: 0, to: erasedBytes.count, by: 4) {
+            XCTAssertLessThanOrEqual(erasedBytes[i], erasedBytes[i + 3]); XCTAssertLessThanOrEqual(erasedBytes[i + 2], erasedBytes[i + 3])
         }
     }
     func testSoftShapesFadeBothSidesOfOutlineAndKeepFillSolidWithOpacityAppliedOnce() {

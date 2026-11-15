@@ -209,6 +209,7 @@ enum ICOCodec {
             }
         }
         var result = Raster(width: l.width, height: l.height)
+        var pixels = result.bytes
         for y in 0..<l.height {
             let row = l.topDown ? y : l.height - 1 - y, start = l.pixelOffset + row * l.stride
             for x in 0..<l.width {
@@ -227,12 +228,13 @@ enum ICOCodec {
                 }
                 if !usesAlpha && l.hasMask && d[l.maskOffset + row * l.maskStride + x / 8] & UInt8(0x80 >> (x % 8)) != 0 { a = 0 }
                 let i = (y * l.width + x) * 4
-                result.bytes[i] = UInt8((Int(r) * Int(a) + 127) / 255)
-                result.bytes[i + 1] = UInt8((Int(g) * Int(a) + 127) / 255)
-                result.bytes[i + 2] = UInt8((Int(b) * Int(a) + 127) / 255)
-                result.bytes[i + 3] = a
+                pixels[i] = UInt8((Int(r) * Int(a) + 127) / 255)
+                pixels[i + 1] = UInt8((Int(g) * Int(a) + 127) / 255)
+                pixels[i + 2] = UInt8((Int(b) * Int(a) + 127) / 255)
+                pixels[i + 3] = a
             }
         }
+        result.bytes = pixels
         return result
     }
 }

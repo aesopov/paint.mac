@@ -127,11 +127,13 @@ enum ICNSCodec {
             if let maskElement {
                 let planeBytes = rep.slot.pixels * rep.slot.pixels / 8
                 guard maskElement.payload.count == planeBytes * 2 else { throw ICNSError.invalidFile }
+                var pixels = raster.bytes
                 for i in 0..<rep.slot.pixels * rep.slot.pixels {
                     if maskElement.payload[planeBytes + i / 8] & UInt8(0x80 >> (i % 8)) == 0 {
-                        raster.bytes.replaceSubrange(i * 4..<i * 4 + 4, with: [0, 0, 0, 0])
+                        pixels.replaceSubrange(i * 4..<i * 4 + 4, with: [0, 0, 0, 0])
                     }
                 }
+                raster.bytes = pixels
             }
         }
         return raster

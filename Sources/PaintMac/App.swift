@@ -333,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func zoomFit() { editor?.canvas.zoomToFit() }
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.13.2",
+            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.14.0",
             .credits: NSAttributedString(string: "A small, native home for your pixels.\nBuilt with Swift, AppKit, and Metal-backed Core Image.\nAn independent editor inspired by the Paint.NET workflow.")
         ])
     }

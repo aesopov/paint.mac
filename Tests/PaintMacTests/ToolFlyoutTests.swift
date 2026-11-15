@@ -112,7 +112,11 @@ final class ToolFlyoutTests: XCTestCase {
         shapes.mouseEntered(with: entered); shapes.mouseExited(with: exited)
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3)); XCTAssertNil(shapes.flyout)
         shapes.mouseEntered(with: entered)
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3)); XCTAssertNotNil(shapes.flyout)
+        // Observe the opening itself: synthetic enter events don't move the
+        // desktop pointer, so a real exit/deactivation may then dismiss it.
+        let deadline = Date(timeIntervalSinceNow: 1)
+        while shapes.flyout == nil && Date() < deadline { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        XCTAssertNotNil(shapes.flyout)
         XCTAssertTrue(choices.isEmpty); shapes.dismissFlyout()
         XCTAssertTrue(shapes.accessibilityPerformShowMenu()); XCTAssertTrue(choices.isEmpty)
         shapes.dismissFlyout()

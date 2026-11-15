@@ -12,7 +12,10 @@ final class RasterTextEditingTests: XCTestCase {
         editor.window!.contentView!.layoutSubtreeIfNeeded(); editor.canvas.setZoom(1)
         return (doc, editor)
     }
-    private func hasInk(_ image: Raster) -> Bool { stride(from: 3, to: image.bytes.count, by: 4).contains { image.bytes[$0] != 0 } }
+    private func hasInk(_ image: Raster) -> Bool {
+        let pixels = image.bytes
+        return stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] != 0 }
+    }
 
     func testTallGlyphsAndPartialLinesAreClippedInsteadOfOmitted() {
         _ = NSApplication.shared

@@ -40,6 +40,7 @@ enum LayerMaskCommand: String, CaseIterable {
 }
 
 final class LayerThumbnailButton: NSButton {
+    private static let previewContext = ImageRenderer().context
     let layerID: UUID
     let editsMask: Bool
     private let preview: NSImage
@@ -54,8 +55,12 @@ final class LayerThumbnailButton: NSButton {
         if (layer.isGroup || layer.effect != nil) && !mask {
             preview = NSImage(systemSymbolName: layer.isGroup ? "folder.fill" : "camera.filters", accessibilityDescription: layer.isGroup ? "Layer group" : "Effect layer")!
         } else {
-            let image = mask ? layer.mask!.editingRaster.cgImage : layer.raster.cgImage
-            preview = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            let raster = mask ? layer.mask!.editingRaster : layer.raster
+            let scale = min(1, min(80 / CGFloat(raster.width), 64 / CGFloat(raster.height)))
+            let size = CGSize(width: max(1, ceil(CGFloat(raster.width) * scale)), height: max(1, ceil(CGFloat(raster.height) * scale)))
+            let pixels = raster.ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let image = Self.previewContext.createCGImage(pixels, from: CGRect(origin: .zero, size: size), format: .RGBA8, colorSpace: Raster.colorSpace)!
+            preview = NSImage(cgImage: image, size: size)
         }
         super.init(frame: .zero)
         self.target = target; self.action = action; isBordered = false

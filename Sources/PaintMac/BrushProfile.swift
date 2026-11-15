@@ -24,12 +24,12 @@ struct BrushProfile {
 /// raster applies tool opacity, color alpha, and selection coverage only once.
 struct SoftBrushStroke {
     let original: Raster
-    private var coverage: [Float]
+    private var coverage: [Int: [Float]] = [:]
     private var lastPoint: CGPoint?
     private var distanceToNextDab = 0.0
     private var dab: SoftBrushDab?
     init(original: Raster) {
-        self.original = original; coverage = [Float](repeating: 0, count: original.width * original.height)
+        self.original = original
     }
     mutating func paint(on raster: inout Raster, from start: CGPoint, to end: CGPoint, size: Double,
                         color: PixelColor, opacity: Double, erase: Bool, selection: SelectionMask?, antialias: Bool, hardness: Double) {
@@ -52,40 +52,58 @@ struct SoftBrushStroke {
         // Repeated/stationary input adds no dabs. Spacing carries across events,
         // including short segments, so event frequency cannot change coverage.
         guard !points.isEmpty else { return }
-        let width = raster.width, bounds = raster.bounds.intersection(selection?.bounds ?? raster.bounds)
-        coverage.withUnsafeMutableBufferPointer { mask in
-            original.bytes.withUnsafeBytes { sourceRaw in
-                let source = sourceRaw.bindMemory(to: UInt8.self)
-                raster.bytes.withUnsafeMutableBytes { raw in
-                    let pixels = raw.bindMemory(to: UInt8.self)
-                    for point in points {
-                        let region = CGRect(x: point.x - dab.radius, y: point.y - dab.radius,
-                                            width: 2 * dab.radius, height: 2 * dab.radius).integral.intersection(bounds)
-                        guard !region.isNull, !region.isEmpty else { continue }
-                        for y in Int(region.minY)..<Int(region.maxY) { for x in Int(region.minX)..<Int(region.maxX) {
-                            let position = y * width + x, sx = Double(x) + 0.5 - point.x, sy = Double(y) + 0.5 - point.y
-                            let value = dab.coverage(distanceSquared: sx * sx + sy * sy)
-                            guard value > 0, mask[position] < 1 else { continue }
-                            mask[position] += value * (1 - mask[position])
-                            // Retain precise accumulation, then resolve to the
-                            // document's 8-bit coverage before compositing.
-                            let coverage = Double((mask[position] * 255).rounded()) / 255
-                            let alpha = coverage * opacity * Double(color.a) / 255 * Double(selection?.coverage[position] ?? 255) / 255
-                            let i = position * 4
-                            if erase {
-                                for c in 0..<4 { pixels[i + c] = UInt8((Double(source[i + c]) * (1 - alpha)).rounded()) }
-                            } else {
-                                for (c, channel) in [color.r, color.g, color.b].enumerated() {
-                                    pixels[i + c] = UInt8(min(255, (Double(channel) * alpha + Double(source[i + c]) * (1 - alpha)).rounded()))
-                                }
-                                pixels[i + 3] = UInt8(min(255, (255 * alpha + Double(source[i + 3]) * (1 - alpha)).rounded()))
+        let bounds = raster.bounds.intersection(selection?.bounds ?? raster.bounds)
+        let columns = raster.storage.columns, side = raster.storage.tileSide
+        var touched = Set<Int>()
+        for point in points {
+            let r = CGRect(x: point.x - dab.radius, y: point.y - dab.radius, width: 2 * dab.radius, height: 2 * dab.radius).integral.intersection(bounds)
+            guard !r.isNull, !r.isEmpty else { continue }
+            for ty in Int(r.minY) / side...Int(r.maxY - 1) / side {
+                for tx in Int(r.minX) / side...Int(r.maxX - 1) / side { touched.insert(ty * columns + tx) }
+            }
+        }
+        for key in touched {
+            let ox = key % columns * side, oy = key / columns * side
+            let tileRegion = CGRect(x: ox, y: oy, width: side, height: side).intersection(bounds)
+            var accumulated = coverage.removeValue(forKey: key) ?? [Float](repeating: 0, count: side * side)
+            let sourceData = original.storage.read(tileRegion)
+            let selectionData = selection?.storage.read(tileRegion)
+            raster.storage.edit(in: tileRegion) { data, region in
+                accumulated.withUnsafeMutableBufferPointer { mask in
+                    sourceData.withUnsafeBytes { sourceRaw in
+                        let source = sourceRaw.bindMemory(to: UInt8.self)
+                        data.withUnsafeMutableBytes { raw in
+                            let pixels = raw.bindMemory(to: UInt8.self), rw = Int(region.width)
+                            for point in points {
+                                let r = CGRect(x: point.x - dab.radius, y: point.y - dab.radius, width: 2 * dab.radius, height: 2 * dab.radius).integral.intersection(region)
+                                guard !r.isNull, !r.isEmpty else { continue }
+                                for y in Int(r.minY)..<Int(r.maxY) { for x in Int(r.minX)..<Int(r.maxX) {
+                                    let m = (y - oy) * side + x - ox, position = (y - Int(region.minY)) * rw + x - Int(region.minX)
+                                    let sx = Double(x) + 0.5 - point.x, sy = Double(y) + 0.5 - point.y
+                                    let value = dab.coverage(distanceSquared: sx * sx + sy * sy)
+                                    guard value > 0, mask[m] < 1 else { continue }
+                                    mask[m] += value * (1 - mask[m])
+                                    let coverage = Double((mask[m] * 255).rounded()) / 255
+                                    let alpha = coverage * opacity * Double(color.a) / 255 * Double(selectionData?[position] ?? 255) / 255
+                                    let i = position * 4
+                                    if erase {
+                                        for c in 0..<4 { pixels[i + c] = UInt8((Double(source[i + c]) * (1 - alpha)).rounded()) }
+                                    } else {
+                                        for (c, channel) in [color.r, color.g, color.b].enumerated() {
+                                            pixels[i + c] = UInt8(min(255, (Double(channel) * alpha + Double(source[i + c]) * (1 - alpha)).rounded()))
+                                        }
+                                        pixels[i + 3] = UInt8(min(255, (255 * alpha + Double(source[i + 3]) * (1 - alpha)).rounded()))
+                                    }
+                                } }
                             }
-                        } }
+                        }
                     }
                 }
             }
+            coverage[key] = accumulated
         }
     }
+
 }
 
 /// Fine spacing avoids visible stamps. Adjust each dab's falloff to retain
@@ -155,16 +173,16 @@ extension Raster {
         }
         guard let outline = mask(fill: false) else { return }
         let fill = fillColor.flatMap { _ in mask(fill: true) }
-        let width = self.width, ox = Int(region.minX), oy = Int(region.minY)
-        bytes.withUnsafeMutableBytes { raw in
+        let ox = Int(region.minX), oy = Int(region.minY)
+        editPixels(in: region) { raw, _ in
             let pixels = raw.bindMemory(to: UInt8.self)
             for y in 0..<rh { for x in 0..<rw {
-                let m = y * rw + x, position = (y + oy) * width + x + ox, i = position * 4
+                let m = y * rw + x, i = m * 4
                 let strokeAlpha = Double(outline[m]) / 255 * Double(color.a) / 255
                 let fillAlpha = Double(fill?[m] ?? 0) / 255 * Double(fillColor?.a ?? 0) / 255 * (1 - strokeAlpha)
                 let alpha = strokeAlpha + fillAlpha
                 guard alpha > 0 else { continue }
-                let strength = opacity * Double(selection?.coverage[position] ?? 255) / 255
+                let strength = opacity * Double(selection?.value(x: x + ox, y: y + oy) ?? 255) / 255
                 let applied = alpha * strength
                 let fillColor = fillColor ?? .clear
                 let channels = [(color.r, fillColor.r), (color.g, fillColor.g), (color.b, fillColor.b)]

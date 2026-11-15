@@ -18,13 +18,14 @@ struct SelectionMask: Equatable {
     let id = UUID()
     let width: Int
     let height: Int
-    let coverage: Data
+    let storage: TileGrid
+    var coverage: Data { storage.read() }
     let bounds: CGRect
     static let colorSpace = CGColorSpace(name: CGColorSpace.linearGray)!
 
     init(width: Int, height: Int, coverage: Data) {
         precondition(width > 0 && height > 0 && coverage.count == width * height)
-        self.width = width; self.height = height; self.coverage = coverage
+        self.width = width; self.height = height; storage = TileGrid(width: width, height: height, channels: 1, data: coverage)
         var minX = width, minY = height, maxX = -1, maxY = -1
         coverage.withUnsafeBytes { raw in
             let p = raw.bindMemory(to: UInt8.self)
@@ -39,7 +40,7 @@ struct SelectionMask: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.id == rhs.id || (lhs.width == rhs.width && lhs.height == rhs.height && lhs.coverage == rhs.coverage)
+        lhs.id == rhs.id || (lhs.width == rhs.width && lhs.height == rhs.height && lhs.storage == rhs.storage)
     }
     var isEmpty: Bool { bounds.isNull }
     var canvasBounds: CGRect { CGRect(x: 0, y: 0, width: width, height: height) }
@@ -50,10 +51,16 @@ struct SelectionMask: Equatable {
     }
     func value(x: Int, y: Int) -> UInt8 {
         guard x >= 0, y >= 0, x < width, y < height else { return 0 }
-        return coverage[y * width + x]
+        return storage.value(x: x, y: y)
     }
-    static func empty(width: Int, height: Int) -> Self { Self(width: width, height: height, coverage: Data(count: width * height)) }
-    static func all(width: Int, height: Int) -> Self { Self(width: width, height: height, coverage: Data(repeating: 255, count: width * height)) }
+    init(storage: TileGrid, bounds: CGRect) {
+        precondition(storage.channels == 1)
+        self.storage = storage; width = storage.width; height = storage.height; self.bounds = bounds
+    }
+    static func empty(width: Int, height: Int) -> Self { Self(storage: TileGrid(width: width, height: height, channels: 1), bounds: .null) }
+    static func all(width: Int, height: Int) -> Self {
+        Self(storage: TileGrid(width: width, height: height, channels: 1, base: [255]), bounds: CGRect(x: 0, y: 0, width: width, height: height))
+    }
 
     static func rectangle(_ rect: CGRect, width: Int, height: Int) -> Self {
         let path = CGPath(rect: rect, transform: nil)
@@ -111,6 +118,7 @@ struct SelectionMask: Equatable {
         var result = Data(count: w * h)
         let startX = max(0, -dx), endX = min(width, w - dx)
         let startY = max(0, -dy), endY = min(height, h - dy)
+        let coverage = self.coverage
         if startX < endX && startY < endY {
             for y in startY..<endY {
                 let source = y * width + startX, target = (y + dy) * w + startX + dx

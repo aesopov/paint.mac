@@ -20,34 +20,22 @@ extension SelectionMask {
     /// existing antialiasing, brush-opacity, and selection-coverage behavior.
     var editingRaster: Raster {
         var result = Raster(width: width, height: height)
-        result.bytes.withUnsafeMutableBytes { raw in
-            coverage.withUnsafeBytes { maskRaw in
-                let dst = raw.bindMemory(to: UInt8.self), src = maskRaw.bindMemory(to: UInt8.self)
-                for i in 0..<src.count {
-                    dst[i * 4] = src[i]; dst[i * 4 + 1] = src[i]; dst[i * 4 + 2] = src[i]; dst[i * 4 + 3] = 255
-                }
-            }
-        }
+        result.storage.base = [storage.base[0], storage.base[0], storage.base[0], 255]
+        result.storage.tiles = storage.tiles.mapValues { $0.converted(channels: 4) }
         return result
     }
     init(editingRaster raster: Raster) {
-        var coverage = Data(count: raster.width * raster.height)
-        coverage.withUnsafeMutableBytes { raw in
-            raster.bytes.withUnsafeBytes { imageRaw in
-                let dst = raw.bindMemory(to: UInt8.self), src = imageRaw.bindMemory(to: UInt8.self)
-                for i in 0..<dst.count {
-                    // Premultiplied values composite erased/transparent pixels
-                    // over black, making eraser and Delete hide mask regions.
-                    dst[i] = maskLuminance(src[i * 4], src[i * 4 + 1], src[i * 4 + 2])
-                }
-            }
-        }
-        self.init(width: raster.width, height: raster.height, coverage: coverage)
+        let base = raster.storage.base
+        var grid = TileGrid(width: raster.width, height: raster.height, channels: 1,
+                            base: [maskLuminance(base[0], base[1], base[2])])
+        grid.tiles = raster.storage.tiles.mapValues { $0.converted(channels: 1) }
+        self.init(storage: grid, bounds: grid.nonzeroBounds)
     }
     func resizedLayerMask(width newWidth: Int, height newHeight: Int, offsetX: Int, offsetY: Int) -> Self {
         var result = Data(repeating: 255, count: newWidth * newHeight)
         let x0 = max(0, -offsetX), x1 = min(width, newWidth - offsetX)
         let y0 = max(0, -offsetY), y1 = min(height, newHeight - offsetY)
+        let coverage = self.coverage
         if x0 < x1 && y0 < y1 {
             for y in y0..<y1 {
                 let source = y * width + x0, target = (y + offsetY) * newWidth + x0 + offsetX

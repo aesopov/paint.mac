@@ -215,6 +215,14 @@ enum ProjectCodec {
 @objc(PaintDocument)
 final class PaintDocument: NSDocument {
     static let typeName = "com.aesopov.paintmac.project"
+    var historyCache = HistoryTileCache() {
+        didSet { oldValue.shutdown(); configureHistoryCache() }
+    }
+    private var historyActions: [WeakHistoryAction] = []
+    private var historyGroup: UInt64 = 0
+    private var historyObserver: NSObjectProtocol?
+    private(set) var lastHistoryError: Error?
+    var onHistoryNotice: ((String) -> Void)?
     var state = DocumentState()
     let renderer = ImageRenderer()
     private(set) var imageCache: CGImage?
@@ -228,7 +236,13 @@ final class PaintDocument: NSDocument {
         super.init()
         fileType = Self.typeName
         hasUndoManager = true
-        undoManager?.levelsOfUndo = 40
+        undoManager?.levelsOfUndo = 0
+        configureHistoryCache()
+        historyObserver = NotificationCenter.default.addObserver(forName: .NSUndoManagerDidCloseUndoGroup, object: undoManager, queue: .main) { [weak self] _ in
+            guard let self, self.undoManager?.groupingLevel == 0 else { return }
+            self.historyGroup &+= 1
+            DispatchQueue.main.async { [weak self] in self?.trimHistory() }
+        }
     }
 
     override class var autosavesInPlace: Bool { true }
@@ -254,21 +268,64 @@ final class PaintDocument: NSDocument {
 
     func invalidate() { imageCache = nil; compositionCache = nil; onChange?() }
 
-    /// Register once per user gesture; pixel Data is copied only on mutation.
+    private func configureHistoryCache() {
+        historyCache.onBudgetChange = { [weak self] in self?.trimHistory() }
+    }
+    /// Register one metadata/tile-ID snapshot per user operation. Pixel versions
+    /// are compressed on the cache queue, never in the input callback.
     func commit(_ previous: DocumentState, name: String) {
         guard previous != state else { return }
-        undoManager?.registerUndo(withTarget: self) { $0.restore(previous, name: name) }
-        undoManager?.setActionName(name)
+        registerHistory(previous, name: name)
         invalidate()
     }
-
-    private func restore(_ snapshot: DocumentState, name: String) {
-        let current = state
-        undoManager?.registerUndo(withTarget: self) { $0.restore(current, name: name) }
-        undoManager?.setActionName(name)
-        state = snapshot
-        invalidate()
+    private func registerHistory(_ state: DocumentState, name: String) {
+        guard let manager = undoManager, manager.isUndoRegistrationEnabled else { return }
+        let action = TileHistoryAction(document: self, snapshot: HistorySnapshot(state, cache: historyCache), name: name, group: historyGroup)
+        manager.registerUndo(withTarget: action) { [action] _ in action.perform() }
+        manager.setActionName(name); historyActions.append(WeakHistoryAction(action))
     }
+    func restoreHistory(_ snapshot: HistorySnapshot, name: String) {
+        do {
+            // Load and validate every needed tile before changing any state.
+            let restored = try snapshot.restored()
+            registerHistory(state, name: name)
+            state = restored; invalidate()
+        } catch {
+            lastHistoryError = error
+            // Native undo bookkeeping still advances after a failed handler.
+            // Keep unsaved artwork marked dirty even when no inverse was made.
+            updateChangeCount(.changeDone)
+            onHistoryNotice?("This undo step could not be read from disk. The current canvas is unchanged.")
+            if let window = windowControllers.first?.window { NSAlert(error: error).beginSheetModal(for: window) }
+            else { NSLog("Paint.MAC undo cache: %@", error.localizedDescription) }
+        }
+    }
+    /// Remove complete native undo groups, including any redo counterparts.
+    /// Metadata has a separate cap, since tile budgets don't cover text strings.
+    func trimHistory() {
+        historyActions.removeAll { $0.action == nil }
+        while true {
+            let live = historyActions.compactMap(\.action).filter { $0.snapshot != nil }
+            let stats = historyCache.statistics
+            let metadataBytes = live.reduce(0) { $0 + ($1.snapshot?.metadataBytes ?? 0) }
+            let failedDiskOverRAM = historyCache.lastError != nil && stats.residentBytes > historyCache.memoryBudget
+            guard stats.diskBytes > historyCache.diskBudget || failedDiskOverRAM || metadataBytes > 16 * 1024 * 1024 || live.count > 500,
+                  let oldest = live.first, oldest.group < historyGroup else { break }
+            for action in live where action.group == oldest.group {
+                undoManager?.removeAllActions(withTarget: action); action.snapshot = nil
+            }
+            historyActions.removeAll { $0.action?.snapshot == nil }
+        }
+        if let error = historyCache.lastError, lastHistoryError == nil {
+            lastHistoryError = error
+            onHistoryNotice?("Disk undo cache is unavailable. Undo history is limited to its RAM budget.")
+        }
+    }
+    override func close() {
+        undoManager?.removeAllActions(); historyActions.removeAll()
+        historyCache.shutdown(); super.close()
+    }
+    deinit { if let historyObserver { NotificationCenter.default.removeObserver(historyObserver) } }
 
     func edit(_ name: String, protectLockedLayers: Bool = true, _ change: (inout DocumentState) -> Void) {
         finishPendingEdits?()
@@ -283,8 +340,9 @@ final class PaintDocument: NSDocument {
     override func fileWrapper(ofType typeName: String) throws -> FileWrapper { try ProjectCodec.encode(state) }
 
     override func read(from fileWrapper: FileWrapper, ofType typeName: String) throws {
-        state = try ProjectCodec.decode(fileWrapper)
-        invalidate()
+        let decoded = try ProjectCodec.decode(fileWrapper)
+        undoManager?.removeAllActions(); historyActions.removeAll()
+        state = decoded; invalidate()
     }
 
     override func writableTypes(for saveOperation: NSDocument.SaveOperationType) -> [String] { [Self.typeName] }

@@ -8,7 +8,7 @@ final class FilledShapeTests: XCTestCase {
     private let rect = CGRect(x: 20, y: 15, width: 60, height: 40)
 
     private func alphas(_ raster: Raster) -> [UInt8] {
-        stride(from: 3, to: raster.bytes.count, by: 4).map { raster.bytes[$0] }
+        { let pixels = raster.bytes; return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] } }()
     }
 
     func testFilledRectangleAndEllipseKeepOutlineFillAndTopLeftCoordinates() {

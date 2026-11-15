@@ -621,7 +621,7 @@ final class CanvasView: NSView, NSEditor {
         if textEditsMask { textLayerID = paintDocument.state.activeID }
         else {
             let active = paintDocument.state.activeLayer
-            let empty = active.isPixelLayer && !stride(from: 3, to: active.raster.bytes.count, by: 4).contains { active.raster.bytes[$0] != 0 }
+            let empty = active.isPixelLayer && active.raster.isTransparent
             guard empty || paintDocument.state.layers.count < 32 else { onStatus?("This version supports up to 32 layers and groups."); NSSound.beep(); return }
             draftTextLayer = empty ? active : PaintLayer(name: "Text", raster: Raster(width: paintDocument.state.width, height: paintDocument.state.height))
             textAddsLayer = !empty; textLayerID = draftTextLayer!.id

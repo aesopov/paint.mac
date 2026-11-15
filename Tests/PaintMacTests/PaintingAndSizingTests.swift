@@ -7,7 +7,7 @@ final class PaintingAndSizingTests: XCTestCase {
     let blue = PixelColor(r: 0, g: 0, b: 255)
 
     private func alphas(_ raster: Raster) -> [UInt8] {
-        stride(from: 3, to: raster.bytes.count, by: 4).map { raster.bytes[$0] }
+        { let pixels = raster.bytes; return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] } }()
     }
     func testSharpBrushLineAndShapesDisableAntialiasingAndOnePixelBrushWorks() {
         var sharp = Raster(width: 50, height: 40), smooth = sharp

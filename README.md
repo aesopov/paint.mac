@@ -2,7 +2,7 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.13.2 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.14.0 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
 
 ## Build and run
 
@@ -208,6 +208,8 @@ Existing version 1, 2, 3, and 4 projects remain readable. Projects save as versi
 - `Raster.swift`: premultiplied RGBA8 pixels, brush rasterization, fill, crop, movement, and the Core Image compositor.
 - `SelectionMask.swift`: immutable 8-bit coverage masks, shape creation, boolean combinations, contours, translation, inversion, and feathering. Further selection operations can be added without changing individual painting tools.
 - `PaintDocument.swift`: document state, undo transactions, ImageIO, layered package encoding, and NSDocument integration.
+- `PixelTiles.swift`: sparse immutable tile versions, bounded pixel access, mask conversion, and Core Image sources.
+- `HistoryCache.swift`: compressed disk-backed tile history, integrity checks, session ownership, and cache budgets.
 - `ICOCodec.swift`: bounded ICO container parsing, legacy DIB/PNG decoding, 32-bit export, size sets, and representation replacement.
 - `ICNSCodec.swift`: bounded ICNS resources, logical/Retina slots, ImageIO decoding, standard-set generation, and resource-preserving replacement.
 - `ImageFileIO.swift`: built-in format import/export boundary, icon representation chooser, and native export controls.
@@ -228,12 +230,14 @@ Existing version 1, 2, 3, and 4 projects remain readable. Projects save as versi
 - `App.swift`: launch, document creation/import, menus, and command validation.
 - `Tests/PaintMacTests`: raster behavior, orientation/transparency, compositing, project validation, saving/export, window ownership, and undo/redo.
 
-Pixel coordinates start at the top left. Layers are stored from bottom to top. A gesture registers one undo snapshot, using Swift Data's copy-on-write storage. Core Image uses Metal when available and falls back to its default renderer. The canvas renders the compositing graph directly into a Metal drawable in premultiplied sRGB, sized to the viewport's backing pixels. Redraw requests are coalesced onto the AppKit run loop, including mouse tracking, and explicitly submit a frame after edits, zoom, pan, resize, and backing-scale changes. Up to three frames can be in flight; completion schedules any pending redraw without blocking input. Cursor and selection overlays and inline text controls remain native AppKit views. Export, sampling, snapshots, and the automatic non-Metal fallback use Core Graphics.
+Pixel coordinates start at the top left. Layers are stored from bottom to top. Layers and masks use sparse, immutable 256 × 256 pixel tiles (smaller for small images). A gesture copies only changed tiles and registers one undo snapshot containing tile IDs and document metadata. Core Image uses Metal when available and falls back to its default renderer. The canvas renders the compositing graph directly into a Metal drawable in premultiplied sRGB, sized to the viewport's backing pixels. Redraw requests are coalesced onto the AppKit run loop, including mouse tracking, and explicitly submit a frame after edits, zoom, pan, resize, and backing-scale changes. Up to three frames can be in flight; completion schedules any pending redraw without blocking input. Cursor and selection overlays and inline text controls remain native AppKit views. Export, sampling, snapshots, and the automatic non-Metal fallback use Core Graphics.
 
 ## Current limits and next steps
 
-This version uses full-image raster buffers, synchronous edits, and up to 40 undo steps. Very large images or many layers can consume substantial memory. Images are limited to 8,192 pixels on either side, 32 million pixels total, and 32 total layer/group nodes. Imported layers retain their pixel size and are clipped if they exceed the canvas.
+Pixel storage and undo history are tiled. Empty layers, group/effect placeholders, and uniform backgrounds/masks allocate no pixel tiles. Native tools edit bounded regions; soft-brush coverage allocates only touched tiles. Core Image assembles immutable tile images for Metal rendering, and thumbnails render directly to small previews. Some whole-image operations, import, saving, and export still use contiguous temporary buffers and synchronous CPU work. Active document pixels, GPU resources, and temporary buffers are separate from the history-cache budget, so very large images or many layers can still consume substantial memory. Images are limited to 8,192 pixels on either side, 32 million pixels total, and 32 total layer/group nodes. Imported layers retain their pixel size and are clipped if they exceed the canvas.
 
 Only Normal layer blending is implemented. Layer styles (shadow/outline/glow), magic wand, gradients, transform handles, pressure-sensitive brushes, plugins, and Paint.NET `.pdn` compatibility are future work. Rectangles and ellipses use native paths for fast drawing even at large thicknesses, with uniform opacity across filled shapes. Native project saves preserve pixels and layers; undo history and the current selection are session state.
 
-The next engineering priorities are tiled image storage, bounded history memory, and moving expensive pixel edits off the main thread. The next editing priorities are magic wand selections and transform handles.
+Undo uses a private, per-document session cache under `~/Library/Application Support/Paint.MAC/UndoCache-v1`. Unchanged tile versions are shared; older pixels are compressed with LZFSE and verified with SHA-256. Disk writes run on a utility queue; a tile stays in RAM until its file has been written and verified. The history cache targets 128 MiB of resident pixels and a 2 GiB allocated disk footprint; in-flight writes can temporarily exceed the RAM target. Completed oldest undo groups are pruned when the disk budget is exceeded. Metadata is capped separately at approximately 16 MiB, with a maximum of 500 recorded actions. History can exceed the previous 40-step limit. Cold undo may wait for disk reads; loading validates all required tiles before replacing the current state. If disk caching is unavailable, history falls back to its RAM budget. Cache sessions are removed on document close; exclusive session locks protect other running instances during abandoned-session cleanup. Undo is session-only and is not saved in projects. Existing v1–v5 projects and image formats remain compatible.
+
+The next engineering priority is moving expensive pixel edits and cold-history loading off the main thread. The next editing priorities are magic wand selections and transform handles.

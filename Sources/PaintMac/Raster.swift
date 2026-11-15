@@ -35,13 +35,36 @@ struct PixelColor: Equatable, Codable {
 struct Raster: Equatable {
     let width: Int
     let height: Int
-    var bytes: Data
+    var storage: TileGrid
+    /// Contiguous pixels are an explicit compatibility boundary for codecs,
+    /// export, and whole-image operations. Live painting uses bounded regions.
+    var bytes: Data {
+        get { storage.read() }
+        set { storage.write(newValue, in: bounds) }
+    }
+    var ciImage: CIImage { storage.ciImage }
+    var isTransparent: Bool {
+        if storage.base[3] > 0 && storage.tiles.count < storage.rows * storage.columns { return false }
+        let side = storage.tileSide
+        for (key, tile) in storage.tiles {
+            let w = min(side, width - key % storage.columns * side)
+            let h = min(side, height - key / storage.columns * side)
+            let empty = tile.data.withUnsafeBytes { raw -> Bool in
+                let p = raw.bindMemory(to: UInt8.self)
+                for y in 0..<h { for x in 0..<w where p[(y * side + x) * 4 + 3] > 0 { return false } }
+                return true
+            }
+            if !empty { return false }
+        }
+        return true
+    }
     static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
     init(width: Int, height: Int, color: PixelColor = .clear) {
         self.width = width; self.height = height
-        bytes = Data(count: width * height * 4)
-        if color.a != 0 { fill(color: color) }
+        let a = Int(color.a)
+        storage = TileGrid(width: width, height: height, channels: 4,
+                           base: [UInt8(Int(color.r) * a / 255), UInt8(Int(color.g) * a / 255), UInt8(Int(color.b) * a / 255), color.a])
     }
 
     init(image: CGImage) throws {
@@ -49,8 +72,9 @@ struct Raster: Equatable {
         guard width > 0, height > 0, width <= 8192, height <= 8192,
               width * height <= 32_000_000 else { throw PaintError.imageTooLarge }
         self.width = width; self.height = height
-        bytes = Data(count: width * height * 4)
-        let rendered = bytes.withUnsafeMutableBytes { ptr -> Bool in
+        storage = TileGrid(width: width, height: height, channels: 4)
+        var pixels = Data(count: width * height * 4)
+        let rendered = pixels.withUnsafeMutableBytes { ptr -> Bool in
             guard let ctx = CGContext(data: ptr.baseAddress, width: width, height: height,
                                       bitsPerComponent: 8, bytesPerRow: width * 4,
                                       space: Self.colorSpace,
@@ -59,6 +83,7 @@ struct Raster: Equatable {
             return true
         }
         guard rendered else { throw PaintError.invalidImage }
+        storage = TileGrid(width: width, height: height, channels: 4, data: pixels)
     }
 
     var cgImage: CGImage {
@@ -74,12 +99,11 @@ struct Raster: Equatable {
 
     func pixel(x: Int, y: Int) -> PixelColor {
         guard x >= 0, y >= 0, x < width, y < height else { return .clear }
-        let i = (y * width + x) * 4
-        let a = Int(bytes[i + 3])
+        let a = Int(storage.value(x: x, y: y, channel: 3))
         guard a > 0 else { return .clear }
-        return PixelColor(r: UInt8(min(255, Int(bytes[i]) * 255 / a)),
-                          g: UInt8(min(255, Int(bytes[i + 1]) * 255 / a)),
-                          b: UInt8(min(255, Int(bytes[i + 2]) * 255 / a)), a: UInt8(a))
+        return PixelColor(r: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 0)) * 255 / a)),
+                          g: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 1)) * 255 / a)),
+                          b: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 2)) * 255 / a)), a: UInt8(a))
     }
 
     mutating func fill(color: PixelColor, rect: CGRect? = nil) {
@@ -88,13 +112,32 @@ struct Raster: Equatable {
         let a = Int(color.a)
         let rgba = [UInt8(Int(color.r) * a / 255), UInt8(Int(color.g) * a / 255),
                     UInt8(Int(color.b) * a / 255), color.a]
-        let w = width
-        bytes.withUnsafeMutableBytes { ptr in
-            let p = ptr.bindMemory(to: UInt8.self)
-            for y in Int(area.minY)..<Int(area.maxY) {
-                for x in Int(area.minX)..<Int(area.maxX) {
-                    let i = (y * w + x) * 4
-                    for c in 0..<4 { p[i + c] = rgba[c] }
+        if area == bounds { storage = TileGrid(width: width, height: height, channels: 4, base: rgba); return }
+        storage.edit(in: area) { data, _ in
+            data.withUnsafeMutableBytes { raw in
+                let p = raw.bindMemory(to: UInt8.self)
+                for i in stride(from: 0, to: p.count, by: 4) { for c in 0..<4 { p[i + c] = rgba[c] } }
+            }
+        }
+    }
+
+    /// A bounded scratch surface preserves Quartz geometry without allocating
+    /// or copying an entire layer. Selection coverage is applied exactly once.
+    mutating func editPixels(in area: CGRect, selection: SelectionMask? = nil,
+                             _ body: (UnsafeMutableRawBufferPointer, CGRect) -> Void) {
+        storage.edit(in: area) { data, region in
+            let before = selection == nil ? Data() : data
+            data.withUnsafeMutableBytes { body($0, region) }
+            if let selection {
+                data.withUnsafeMutableBytes { raw in
+                    before.withUnsafeBytes { old in
+                        let p = raw.bindMemory(to: UInt8.self), src = old.bindMemory(to: UInt8.self)
+                        let rw = Int(region.width)
+                        for y in 0..<Int(region.height) { for x in 0..<rw {
+                            let a = Int(selection.value(x: x + Int(region.minX), y: y + Int(region.minY))), i = (y * rw + x) * 4
+                            for c in 0..<4 { p[i + c] = UInt8((Int(p[i + c]) * a + Int(src[i + c]) * (255 - a) + 127) / 255) }
+                        } }
+                    }
                 }
             }
         }
@@ -121,20 +164,20 @@ struct Raster: Equatable {
             .integral.intersection(bounds).intersection(clip ?? bounds).intersection(selection?.bounds ?? bounds)
         guard !region.isNull, !region.isEmpty else { return }
         let dx = end.x - start.x, dy = end.y - start.y
-        let lengthSquared = dx * dx + dy * dy, w = width
+        let lengthSquared = dx * dx + dy * dy
         func render() {
-            bytes.withUnsafeMutableBytes { ptr in
+            editPixels(in: region) { ptr, region in
                 let p = ptr.bindMemory(to: UInt8.self)
                 for y in Int(region.minY)..<Int(region.maxY) {
                     for x in Int(region.minX)..<Int(region.maxX) {
-                        let px = Double(x) + 0.5, py = Double(y) + 0.5, position = y * w + x
+                        let px = Double(x) + 0.5, py = Double(y) + 0.5
                         let t = lengthSquared == 0 ? 0 : max(0, min(1, ((px - start.x) * dx + (py - start.y) * dy) / lengthSquared))
                         let distance = hypot(px - start.x - t * dx, py - start.y - t * dy)
                         let coverage = profile.coverage(at: distance)
-                        let selectionAlpha = selection.map { Double($0.coverage[position]) / 255 } ?? 1
+                        let selectionAlpha = selection.map { Double($0.value(x: x, y: y)) / 255 } ?? 1
                         let alpha = coverage * opacity * Double(color.a) / 255 * selectionAlpha
                         guard alpha > 0 else { continue }
-                        let i = position * 4
+                        let i = ((y - Int(region.minY)) * Int(region.width) + x - Int(region.minX)) * 4
                         if erase {
                             for c in 0..<4 { p[i + c] = UInt8((Double(p[i + c]) * (1 - alpha)).rounded()) }
                         } else {
@@ -161,16 +204,16 @@ struct Raster: Equatable {
                             selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness)
             return
         }
-        let w = width, h = height
-        let area = (clip ?? bounds).intersection(bounds).intersection(selection?.bounds ?? bounds)
+        let radius = max(1, size) / 2 + 2
+        let area = rect.insetBy(dx: -radius, dy: -radius).integral.intersection(clip ?? bounds).intersection(bounds).intersection(selection?.bounds ?? bounds)
         guard !area.isNull, !area.isEmpty else { return }
-        bytes.withUnsafeMutableBytes { ptr in
+        editPixels(in: area, selection: selection) { ptr, region in
+            let w = Int(region.width), h = Int(region.height)
             guard let ctx = CGContext(data: ptr.baseAddress, width: w, height: h,
                                       bitsPerComponent: 8, bytesPerRow: w * 4,
                                       space: Self.colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-            if let selection { ctx.clip(to: CGRect(x: 0, y: 0, width: w, height: h), mask: selection.cgImage) }
-            ctx.translateBy(x: 0, y: CGFloat(h))
+            ctx.translateBy(x: -region.minX, y: region.maxY)
             ctx.scaleBy(x: 1, y: -1)
             ctx.clip(to: area)
             ctx.setShouldAntialias(antialias)
@@ -214,7 +257,7 @@ struct Raster: Equatable {
                 visited[index] = true
                 let px = index % w, py = index / w, i = index * 4
                 guard area.contains(CGPoint(x: px, y: py)) else { continue }
-                let coverage = Int(selection?.coverage[index] ?? 255)
+                let coverage = Int(selection?.value(x: px, y: py) ?? 255)
                 guard coverage > 0 else { continue }
                 let a = Int(p[i + 3])
                 let r = a == 0 ? 0 : min(255, Int(p[i]) * 255 / a)
@@ -238,11 +281,7 @@ struct Raster: Equatable {
         let area = rect.integral.intersection(bounds)
         guard !area.isNull, !area.isEmpty else { return Raster(width: 1, height: 1) }
         var result = Raster(width: Int(area.width), height: Int(area.height))
-        for y in 0..<result.height {
-            let start = ((y + Int(area.minY)) * width + Int(area.minX)) * 4
-            result.bytes.replaceSubrange(y * result.width * 4..<(y + 1) * result.width * 4,
-                                         with: bytes[start..<start + result.width * 4])
-        }
+        result.storage = TileGrid(width: result.width, height: result.height, channels: 4, data: storage.read(area))
         return result
     }
 
@@ -251,18 +290,21 @@ struct Raster: Equatable {
         var result = self
         result.fill(color: .clear, rect: area)
         guard !area.isNull, !area.isEmpty else { return result }
+        let source = bytes
+        var destination = result.bytes
         for y in Int(area.minY)..<Int(area.maxY) {
             for x in Int(area.minX)..<Int(area.maxX) {
                 let tx = x + dx, ty = y + dy
                 guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
                 let src = (y * width + x) * 4, dst = (ty * width + tx) * 4
                 // Composite moved pixels over content that was outside the selection.
-                let alpha = Double(bytes[src + 3]) / 255
+                let alpha = Double(source[src + 3]) / 255
                 for c in 0..<4 {
-                    result.bytes[dst + c] = UInt8(min(255, (Double(bytes[src + c]) + Double(result.bytes[dst + c]) * (1 - alpha)).rounded()))
+                    destination[dst + c] = UInt8(min(255, (Double(source[src + c]) + Double(destination[dst + c]) * (1 - alpha)).rounded()))
                 }
             }
         }
+        result.bytes = destination
         return result
     }
 
@@ -336,12 +378,15 @@ struct Raster: Equatable {
         let x0 = max(0, -offsetX), x1 = min(width, newWidth - offsetX)
         let y0 = max(0, -offsetY), y1 = min(height, newHeight - offsetY)
         guard x0 < x1, y0 < y1 else { return result }
+        let source = bytes
+        var destination = result.bytes
         for y in y0..<y1 {
-            let source = (y * width + x0) * 4
+            let sourceOffset = (y * width + x0) * 4
             let target = ((y + offsetY) * newWidth + x0 + offsetX) * 4
             let count = (x1 - x0) * 4
-            result.bytes.replaceSubrange(target..<target + count, with: bytes[source..<source + count])
+            destination.replaceSubrange(target..<target + count, with: source[sourceOffset..<sourceOffset + count])
         }
+        result.bytes = destination
         return result
     }
 
@@ -369,16 +414,15 @@ struct Raster: Equatable {
     mutating func drawText(_ text: String, in box: CGRect, font: NSFont, color: PixelColor,
                            opacity: Double, antialias: Bool, selection: SelectionMask?, horizontalScale: Double = 1) {
         guard !text.isEmpty, box.width > 0, box.height > 0 else { return }
-        let w = width, h = height
         let layout = TextRasterLayout(text: text, font: font, color: color, width: box.width / horizontalScale)
-        bytes.withUnsafeMutableBytes { raw in
+        editPixels(in: box.integral.intersection(bounds).intersection(selection?.bounds ?? bounds), selection: selection) { raw, region in
+            let w = Int(region.width), h = Int(region.height)
             guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
                                       bytesPerRow: w * 4, space: Self.colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
-            if let selection { ctx.clip(to: CGRect(x: 0, y: 0, width: w, height: h), mask: selection.cgImage) }
             ctx.setAllowsAntialiasing(antialias); ctx.setShouldAntialias(antialias)
             ctx.setAllowsFontSmoothing(false); ctx.setShouldSmoothFonts(false)
-            ctx.translateBy(x: 0, y: CGFloat(h)); ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: -region.minX, y: region.maxY); ctx.scaleBy(x: 1, y: -1)
             ctx.clip(to: box)
             ctx.translateBy(x: box.minX, y: box.minY)
             ctx.scaleBy(x: horizontalScale, y: 1)
@@ -421,18 +465,9 @@ final class ImageRenderer {
     }
     private func coverageImage(_ mask: SelectionMask?, opacity: Double, bounds: CGRect) -> CIImage {
         guard let mask else { return CIImage(color: CIColor(red: 1, green: 1, blue: 1, alpha: opacity)).cropped(to: bounds) }
-        var alpha = Raster(width: mask.width, height: mask.height)
-        alpha.bytes.withUnsafeMutableBytes { raw in
-            mask.coverage.withUnsafeBytes { coverage in
-                let dst = raw.bindMemory(to: UInt8.self), src = coverage.bindMemory(to: UInt8.self)
-                for i in 0..<src.count {
-                    let value = UInt8((Double(src[i]) * opacity).rounded())
-                    for c in 0..<4 { dst[i * 4 + c] = value }
-                }
-            }
-        }
-        return CIImage(cgImage: alpha.cgImage)
+        return self.opacity(mask.storage.ciImage, opacity)
     }
+
     private func masked(_ image: CIImage, using mask: SelectionMask) -> CIImage {
         image.applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: coverageImage(mask, opacity: 1, bounds: image.extent)])
     }
@@ -461,7 +496,10 @@ final class ImageRenderer {
         }
         func content(_ id: UUID) -> CIImage {
             guard let node = nodes[id] else { return clear }
-            if !node.isGroup { return CIImage(cgImage: node.displayRaster.cgImage) }
+            if !node.isGroup {
+                let image = node.raster.ciImage
+                return node.maskEnabled ? node.mask.map { renderer.masked(image, using: $0) } ?? image : image
+            }
             let image = siblings(id)
             if node.maskEnabled, let mask = node.mask { return renderer.masked(image, using: mask) }
             return image
