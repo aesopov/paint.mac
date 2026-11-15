@@ -125,7 +125,7 @@ final class InspectorResizeTests: XCTestCase {
                 XCTAssertEqual(doc.state, original); XCTAssertGreaterThanOrEqual(editor.canvas.bounds.width, 320)
                 if size.width == 1320, let folder = ProcessInfo.processInfo.environment["PAINTMAC_INSPECTOR_PREVIEW_DIR"] {
                     editor.canvas.zoomToFit(); root.displayIfNeeded(); CATransaction.flush()
-                    let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds)); root.cacheDisplay(in: root.bounds, to: bitmap)
+                    let bitmap = try XCTUnwrap(editor.canvas.snapshot(of: root))
                     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: folder).appendingPathComponent(theme == .aqua ? "inspector-light.png" : "inspector-dark.png"))
                 }
             }

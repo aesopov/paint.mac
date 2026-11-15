@@ -127,8 +127,7 @@ final class InlineEditingTests: XCTestCase {
         canvas.setZoom(1)
         if let path = ProcessInfo.processInfo.environment["PAINTMAC_INLINE_PREVIEW_PATH"] {
             let root = editor.window!.contentView!; root.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
-            root.cacheDisplay(in: root.bounds, to: bitmap)
+            let bitmap = try XCTUnwrap(canvas.snapshot(of: root))
             try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
         }
         doc.undoManager?.groupsByEvent = false

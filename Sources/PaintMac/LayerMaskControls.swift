@@ -18,10 +18,11 @@ enum LayerMaskCommand: String, CaseIterable {
         }
     }
     func isEnabled(in state: DocumentState) -> Bool {
+        guard !state.isEffectivelyLocked(state.activeID) else { return false }
         switch self {
         case .revealAll, .hideAll: return state.activeLayer.mask == nil
         case .fromSelection: return state.activeLayer.mask == nil && state.selection != nil
-        case .apply: return state.activeLayer.mask != nil && (state.activeLayer.effect == nil || state.canMergeDown)
+        case .apply: return state.activeLayer.mask != nil && (!state.activeLayer.isGroup || state.canModifySubtree(state.activeID)) && (state.activeLayer.effect == nil || state.canMergeDown)
         default: return state.activeLayer.mask != nil
         }
     }
@@ -44,10 +45,12 @@ final class LayerThumbnailButton: NSButton {
     private let preview: NSImage
     private let selected: Bool
     private let disabledMask: Bool
+    private let showsTransparency: Bool
 
     init(layer: PaintLayer, mask: Bool, selected: Bool, target: AnyObject, action: Selector) {
         layerID = layer.id; editsMask = mask; self.selected = selected
         disabledMask = mask && !layer.maskEnabled
+        showsTransparency = !mask && !layer.isGroup && layer.effect == nil
         if (layer.isGroup || layer.effect != nil) && !mask {
             preview = NSImage(systemSymbolName: layer.isGroup ? "folder.fill" : "camera.filters", accessibilityDescription: layer.isGroup ? "Layer group" : "Effect layer")!
         } else {
@@ -59,20 +62,32 @@ final class LayerThumbnailButton: NSButton {
         let kind = layer.isGroup ? "group" : (layer.effect != nil ? "effect layer" : (layer.text != nil ? "text layer" : "image layer"))
         setAccessibilityLabel(mask ? "Edit mask for \(layer.name)" : "Select \(kind) \(layer.name)")
         toolTip = mask ? "Edit layer mask: black hides, white reveals.\(disabledMask ? " Mask is disabled." : "")"
-            : (layer.isGroup ? "Select group. Move moves its contents and masks together. Add a layer inside the group to paint."
+            : (layer.isGroup ? "Select group. Move moves its contents and masks together. Drawing creates a paint layer inside the group."
                : (layer.text != nil ? "Double-click to edit text. Rasterize Text Layer enables pixel painting."
                   : (layer.effect != nil ? "Double-click to edit effect settings. Its mask controls where the effect applies."
                      : "Edit image pixels. Move moves the image and its mask together.")))
-        widthAnchor.constraint(equalToConstant: mask ? 32 : 44).isActive = true
+        widthAnchor.constraint(equalToConstant: 44).isActive = true
         heightAnchor.constraint(equalToConstant: 36).isActive = true
     }
     required init?(coder: NSCoder) { fatalError() }
+    // The table handles pointer clicks and drags; keep native button actions
+    // available for accessibility and keyboard activation.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 2, dy: 2)
         let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
         NSGraphicsContext.saveGraphicsState()
         path.addClip()
-        NSColor(calibratedWhite: 0.9, alpha: 1).setFill(); rect.fill()
+        NSColor(calibratedWhite: showsTransparency ? 0.94 : 0.9, alpha: 1).setFill(); rect.fill()
+        if showsTransparency {
+            NSColor(calibratedWhite: 0.76, alpha: 1).setFill()
+            let tile: CGFloat = 4
+            for y in 0..<Int(ceil(rect.height / tile)) {
+                for x in 0..<Int(ceil(rect.width / tile)) where (x + y) % 2 == 0 {
+                    NSRect(x: rect.minX + CGFloat(x) * tile, y: rect.minY + CGFloat(y) * tile, width: tile, height: tile).fill()
+                }
+            }
+        }
         let scale = min(rect.width / preview.size.width, rect.height / preview.size.height)
         let size = NSSize(width: preview.size.width * scale, height: preview.size.height * scale)
         preview.draw(in: CGRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height),

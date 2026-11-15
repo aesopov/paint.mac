@@ -125,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         layer.addItem(effectItem)
         add(layer, "Rename Layer…", #selector(renameLayer))
         add(layer, "Delete Layer", #selector(removeLayer))
+        add(layer, "Lock Layer", #selector(toggleLayerLock))
         layer.addItem(.separator())
         add(layer, "Move Layer Up", #selector(layerUp))
         add(layer, "Move Layer Down", #selector(layerDown))
@@ -274,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func addLayer() { editor?.addLayer() }
     @objc func duplicateLayer() { editor?.duplicateLayer() }
     @objc func removeLayer() { editor?.removeLayer() }
+    @objc func toggleLayerLock() { editor?.toggleLayerLock() }
     @objc func editLayerContent() { editor?.editLayerContent() }
     @objc func rasterizeTextLayer() { editor?.rasterizeTextLayer() }
     @objc func addEffectLayer(_ sender: NSMenuItem) { editor?.addEffectLayer(sender) }
@@ -322,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     }
     @objc func deletePixels() {
         if let text = NSApp.keyWindow?.firstResponder as? NSTextView { text.delete(nil) }
+        else if NSApp.keyWindow?.firstResponder is LayerTableView { editor?.removeLayer() }
         else { editor?.canvas.deletePixels() }
     }
     @objc func zoomIn() { if let canvas = editor?.canvas { canvas.setZoom(canvas.zoom * 1.25) } }
@@ -330,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func zoomFit() { editor?.canvas.zoomToFit() }
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.10.2",
+            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.13.2",
             .credits: NSAttributedString(string: "A small, native home for your pixels.\nBuilt with Swift, AppKit, and Metal-backed Core Image.\nAn independent editor inspired by the Paint.NET workflow.")
         ])
     }
@@ -370,15 +373,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         }
         if action == #selector(deselect) || action == #selector(invertSelection) { return editor.canvas.selection != nil }
         if action == #selector(cropImage) || action == #selector(featherSelection) { return editor.canvas.selection?.isEmpty == false }
-        if action == #selector(editLayerContent) { return state.activeLayer.text != nil || state.activeLayer.effect != nil }
-        if action == #selector(rasterizeTextLayer) { return state.activeLayer.text != nil }
+        if action == #selector(editLayerContent) { return !state.isEffectivelyLocked(state.activeID) && (state.activeLayer.text != nil || state.activeLayer.effect != nil) }
+        if action == #selector(rasterizeTextLayer) { return !state.isEffectivelyLocked(state.activeID) && state.activeLayer.text != nil }
         if action == #selector(addEffectLayer(_:)) { return state.layers.count < 32 }
-        if action == #selector(removeLayer) { return state.subtreeIDs(state.activeID).count < state.layers.count }
+        if action == #selector(removeLayer) { return state.canRemoveLayers(editor.selectedLayerIDs) }
+        if action == #selector(toggleLayerLock) {
+            (item as? NSMenuItem)?.title = state.activeLayer.isLocked ? "Unlock Layer" : "Lock Layer"
+            return !state.ancestors(of: state.activeID).contains(where: state.isEffectivelyLocked)
+        }
         if action == #selector(mergeDown) { return state.canMergeDown }
         if action == #selector(layerDown) { return state.canReorderActive(by: -1) }
         if action == #selector(layerUp) { return state.canReorderActive(by: 1) }
         if action == #selector(ungroup) { return state.canUngroupActive }
-        if action == #selector(mergeGroup) { return state.activeLayer.isGroup }
+        if action == #selector(mergeGroup) { return state.activeLayer.isGroup && state.canModifySubtree(state.activeID) }
         if action == #selector(toggleClipping) {
             (item as? NSMenuItem)?.title = state.activeLayer.isClipped ? "Release Clipping Mask" : "Create Clipping Mask"
             return state.canClipActive
@@ -388,6 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         if action == #selector(copyPixels), state.activeLayer.effect != nil, !state.isEditingMask {
             return NSApp.keyWindow?.firstResponder is NSTextView
         }
+        if action == #selector(deletePixels), NSApp.keyWindow?.firstResponder is LayerTableView { return state.canRemoveLayers(editor.selectedLayerIDs) }
         if action == #selector(deletePixels) || action == #selector(cutPixels) || action == #selector(invertImage) || action == #selector(grayscaleImage) {
             if (action == #selector(deletePixels) || action == #selector(cutPixels)), NSApp.keyWindow?.firstResponder is NSTextView { return true }
             return state.canPaintTarget && state.activeEffectivelyVisible

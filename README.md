@@ -2,7 +2,7 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.10.2 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.13.2 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
 
 ## Build and run
 
@@ -23,10 +23,17 @@ Open `Package.swift` in Xcode to work on the project. Run the tests with:
 swift test
 ```
 
+GPU regression tests compare drawable pixels with exported pixels, including alpha, masks, effects, text, orientation, and zoom. To compare the previous Core Graphics display path with direct Metal rendering on a synthetic multilayer document, run:
+
+```sh
+PAINTMAC_METAL_BENCHMARK=1 swift test -c release --filter MetalCanvasTests/testRenderingBenchmarkWhenRequested
+```
+
 ## What works
 
 - Native light and dark appearances follow macOS, including changes while an editor is open. A thin border separates the canvas viewport from the panels. Drag the divider beside Colors & Layers to resize the right panel; double-click it to reset. The chosen width is remembered for new windows and launches.
-- Brush and eraser with adjustable size and opacity.
+- Metal canvas: layer compositing and live text/effect previews render directly to a viewport-sized drawable, without an intermediate CPU composite. Rendering is on demand; moving the brush cursor or changing a selection redraws only the AppKit overlay. Zoom uses crisp nearest-neighbor sampling at 100% and above, with smooth downsampling below 100%, including on Retina displays and in the Core Graphics fallback. This display filtering is independent of the drawing tool's Sharp/Smooth setting. Core Graphics remains available for export, color sampling, offscreen snapshots, and fallback when Metal is unavailable or fails.
+- Brush and eraser with adjustable size, opacity, and hardness. Soft strokes keep event overlaps from building dark seams.
 - Main and alternate colors: left/right mouse painting, palette assignment, and color picking. X swaps the colors.
 - Contiguous paint bucket with adjustable tolerance, and a color picker.
 - Lines, rectangles, and ellipses with a shared Sharp/Smooth edge toggle; rectangles and ellipses can also be filled with the opposite color. Brushes, erasing, text, and selection shapes also honor the edge mode.
@@ -90,13 +97,17 @@ Press the opposite mouse button during a gesture to cancel it: LMB then RMB, or 
 
 Double-click an image/group layer to rename it; text and effect layers reopen their editors. **Layer → Rename Layer…** renames any layer. Hold the middle mouse button (wheel click) and drag to pan with any tool, including over an active text box; this preserves the text draft and selected tool. Scrolling zooms around the pointer by default: wheel up zooms in and wheel down zooms out regardless of Natural Scrolling. Hold Option to pan, or Shift to pan horizontally; panning follows the macOS scroll direction setting. Holding Space also temporarily switches scrolling to pan. Clipboard copy uses the active layer.
 
+Select layer rows and press Delete/Forward Delete, click the trash button, or drag rows onto the panel's trash button to delete them. Deletion supports undo and always keeps at least one layer. Delete on the canvas still clears pixels; Delete while typing edits text.
+
+Click the lock beside a layer, or choose **Layer → Lock Layer**, to protect its pixels, mask, text/effect settings, opacity, position, and deletion. A group lock protects all its children and prevents adding or removing contents. Unlock the parent group to edit its children. Locked layers can still be selected, hidden, renamed, and copied. Lock/unlock supports undo and is saved in `.paintmac` projects. Whole-image scale, canvas resize, and crop still apply to every layer and retain lock state.
+
 Drag the thin divider between the canvas and **Colors & Layers** to widen or narrow the inspector. Color fields, sliders, menus, and layer names use the additional space. Its minimum width keeps the controls usable, and the canvas retains at least 320 points. Window resizing temporarily clamps an oversized inspector and restores your preferred width when space returns. Double-click the divider to reset to the default width. Resizing preserves zoom, selections, undo history, and active inline text.
 
 ## Layer groups and clipping masks
 
-Command-click or Shift-click layer rows to select adjacent layers, then choose **Layer → Group Selected Layers** (Command-G), or use **Layers ▾** beneath the layer list. **New Group** creates an empty folder; with a group selected, Add Layer or Import as Layer places new artwork inside it. Disclosure arrows collapse/expand folders. **Layers ▾ → Move to Group** moves selected layers into an existing group or back to **Top Level**. The up/down buttons reorder within the current parent. Grouping and structural moves carry entire clipping stacks together.
+Command-click or Shift-click layer rows to select adjacent layers, then choose **Layer → Group Selected Layers** (Command-G), or use **Layers ▾** beneath the layer list. **New Group** creates an empty folder; with a group selected, Add Layer or Import as Layer places new artwork inside it. Disclosure arrows after the eye button collapse/expand folders. Small checkerboards in layer thumbnails show transparent pixels. **Layers ▾ → Move to Group** moves selected layers into an existing group or back to **Top Level**. Drag layer rows between rows to reorder them, or onto a group to move them inside. Dragging carries groups with all their descendants and keeps clipping stacks together. The up/down buttons reorder within the current parent. Grouping and structural moves carry entire clipping stacks together.
 
-Groups support nesting up to eight levels, their own visibility, opacity, and grayscale mask. Opacity and masks apply once to the combined contents. Groups use isolated Normal blending. The Move tool moves all descendant pixels and masks together; click the group mask to move or paint just that mask. To paint image pixels, select a child image layer or add a layer inside the group. Copy copies the group's visible contents; Cut/Delete and image adjustments require an image layer or mask target.
+Groups support nesting up to eight levels, their own visibility, opacity, and grayscale mask. Opacity and masks apply once to the combined contents. Groups use isolated Normal blending. The Move tool moves all descendant pixels and masks together; click the group mask to move or paint just that mask. With a group selected, brush, fill, and shape drawing automatically create and select a paint layer inside it. The new layer and drawing share one undo step; cancelling restores the original group selection and contents. Empty gestures create no layer. Text creates an editable text child. Erasing requires selecting an existing image layer or group mask. Copy copies the group's visible contents; Cut/Delete and image adjustments require an image layer or mask target.
 
 **Ungroup** (Shift-Command-G) releases a visible 100% group without a mask, clipping, or direct unclipped effect layers. For groups with those effects, **Merge Group** preserves the current appearance in one raster layer. Applying a group mask is explicitly labeled **Apply Mask & Merge Group**, since baking it correctly requires merging the group. Duplicate, delete, merge, group, ungroup, and move operations support undo.
 
@@ -113,6 +124,8 @@ The menu also offers **Invert Mask**, **Feather Mask…** (0–200 image pixels)
 Moving image pixels moves the mask with them; selecting the mask thumbnail lets you move just the mask. Scale, canvas resize, crop, and duplicate preserve masks; merge bakes the visible masked appearance. Exports include enabled masks. Save `.paintmac` projects to retain editable masks and their enabled state.
 
 ## Selections and feathering
+
+The tool rail groups **Selections** (Rectangle, Ellipse, Lasso) and **Shapes** (Rectangle, Ellipse, Line). Each button shows and remembers its last type. Hover to open a menu on the right, where a checkmark identifies the current type; click a row to choose another. Clicking the rail button selects its remembered type. Right-click also opens the menu; use Up/Down and Return to choose, or Escape to close. Existing tool shortcuts update the remembered type. Hovering preserves text drafts, focus, selections, and undo history.
 
 Choose Rectangle Select (S), Ellipse Select (M), or Lasso Select (Q). The options bar offers Replace, Add, Subtract, and Intersect. Hold Shift to add, Option to subtract, or both to intersect when beginning a gesture; these modifiers override the options-bar mode for that gesture. Control constrains rectangle and ellipse dimensions. Escape cancels an in-progress selection or deselects when idle.
 
@@ -134,7 +147,9 @@ Brush, eraser, fill, destructive adjustments, Cut, and Delete require an image l
 
 For **Rectangle** and **Ellipse**, enable **Filled** in the tool options to paint the interior. Left-drag uses the main color for the outline and alternate color for the fill; right-drag swaps them. Uncheck Filled for an outline only. Size controls outline thickness, and Opacity applies once to the whole shape. Both colors respect selections, feathering, and mask editing. The option stays selected when switching tools and does not affect lines.
 
-**Smooth** enables antialiasing; **Sharp** disables it for new brush/eraser strokes, lines and shapes, text, and curved/freehand selections. Shift-constrained drawn shapes snap their anchor and side length in Sharp mode so the pixel width and height match. A click with any selection tool deselects instead of creating a one-pixel mask. Sharp still honors intentional opacity and feathered selection coverage. Fill operates on connected pixels without generating an antialiased outline.
+**Hardness** controls brush/eraser falloff and line, rectangle, and ellipse outlines: 100% retains the hard edge, while 0% fades gradually from the center to the edge. Filled interiors keep their alternate color; only the outline softens. The value stays selected when switching tools. Soft brush/eraser strokes blend evenly spaced dabs so crossings have smooth falloffs. Spacing is independent of mouse-event frequency; stationary input adds no paint. Opacity, color alpha, and selection coverage apply once against the raster at the start of the gesture, so crossings cannot exceed tool opacity. Separate strokes can still build opacity. Masks and selections retain their partial coverage.
+
+**Smooth** enables antialiasing; **Sharp** disables it for new brush/eraser strokes, lines and shapes, text, and curved/freehand selections. Shift-constrained drawn shapes snap their anchor and side length in Sharp mode so the pixel width and height match. A click with any selection tool deselects instead of creating a one-pixel mask. Sharp still honors intentional opacity, brush hardness falloff, and feathered selection coverage. Fill operates on connected pixels without generating an antialiased outline.
 
 Open **Image → Image & Canvas Size…** (Option-Command-R):
 
@@ -183,12 +198,13 @@ As with ICO, Command-S saves the layered Paint.MAC project. Export writes the ic
 
 ## Project format
 
-A `.paintmac` file is a macOS package containing `document.json` and a lossless PNG per image layer. The manifest records dimensions, ordering, visibility, opacity, and the active layer. Version 1 stores flat layers; version 2 adds lossless, top-left L8 `UUID.mask` payloads and enabled state. Payload lengths must match the validated canvas dimensions exactly. Version 3 adds group nodes, parent IDs, clipping flags, and folder expansion state; group nodes have no PNG. Version 4 adds typed text/effect metadata. Text stores content/style/geometry, a lossless raster PNG cache, and an optional L8 `UUID.text-mask` creation clip. Effects store validated parameters without a PNG. Storage is bottom-to-top postorder, with descendants before each group header. Parent links, canonical order, clipping bases, and nesting limits are validated on read.
+A `.paintmac` file is a macOS package containing `document.json` and a lossless PNG per image layer. The manifest records dimensions, ordering, visibility, opacity, and the active layer. Version 1 stores flat layers; version 2 adds lossless, top-left L8 `UUID.mask` payloads and enabled state. Payload lengths must match the validated canvas dimensions exactly. Version 3 adds group nodes, parent IDs, clipping flags, and folder expansion state; group nodes have no PNG. Version 4 adds typed text/effect metadata. Version 5 adds persistent layer locks. Text stores content/style/geometry, a lossless raster PNG cache, and an optional L8 `UUID.text-mask` creation clip. Effects store validated parameters without a PNG. Storage is bottom-to-top postorder, with descendants before each group header. Parent links, canonical order, clipping bases, and nesting limits are validated on read.
 
-Existing version 1, 2, and 3 projects remain readable. Projects save as version 1 without masks or hierarchy, version 2 with masks alone, version 3 with groups/clipping, or version 4 with editable text/effects. Masked projects require Paint.MAC 0.8 or later; grouped/clipped projects require 0.9 or later; editable text/effects require 0.10 or later. Older versions reject newer manifests rather than silently losing features. The selected editing target, selection, and history remain session state. Native NSDocument saving provides atomic file replacement and autosave behavior.
+Existing version 1, 2, 3, and 4 projects remain readable. Projects save as version 1 without masks or hierarchy, version 2 with masks alone, version 3 with groups/clipping, version 4 with editable text/effects, or version 5 when any layer is locked. Masked projects require Paint.MAC 0.8 or later; grouped/clipped projects require 0.9 or later; editable text/effects require 0.10 or later; locked projects require 0.12 or later. Older versions reject newer manifests rather than silently losing features. The selected editing target, selection, and history remain session state. Native NSDocument saving provides atomic file replacement and autosave behavior.
 
 ## Code layout
 
+- `BrushProfile.swift`: shared hardness falloff, per-gesture soft brush coverage, and bounded grayscale masks for soft shape outlines.
 - `Raster.swift`: premultiplied RGBA8 pixels, brush rasterization, fill, crop, movement, and the Core Image compositor.
 - `SelectionMask.swift`: immutable 8-bit coverage masks, shape creation, boolean combinations, contours, translation, inversion, and feathering. Further selection operations can be added without changing individual painting tools.
 - `PaintDocument.swift`: document state, undo transactions, ImageIO, layered package encoding, and NSDocument integration.
@@ -196,9 +212,11 @@ Existing version 1, 2, and 3 projects remain readable. Projects save as version 
 - `ICNSCodec.swift`: bounded ICNS resources, logical/Retina slots, ImageIO decoding, standard-set generation, and resource-preserving replacement.
 - `ImageFileIO.swift`: built-in format import/export boundary, icon representation chooser, and native export controls.
 - `LayerTree.swift`: validated layer hierarchy, grouping, clipping stacks, subtree operations, and merge behavior.
+- `LayerInteraction.swift`: hierarchy-safe drag reordering, trash drop targets, panel Delete handling, and persistent layer locks.
 - `LayerMask.swift`: grayscale coverage conversion, nondestructive mask commands, and lossless mask editing.
 - `LayerMaskControls.swift`: mask menu commands and pixel/mask thumbnail controls.
 - `CanvasView.swift`: canvas drawing, coordinate conversion, selection overlays, pointer gestures, and tool shortcuts.
+- `MetalCanvasView.swift`: on-demand Metal drawable presentation, viewport/Retina transforms, bounded GPU submissions, and the native overlay view.
 - `EditorWindowController.swift`: native tool rail, inspector, layer controls, and editing commands.
 - `InspectorSplitView.swift`: native inspector divider, minimum pane sizes, width preferences, and resize behavior.
 - `EditorPanelView.swift`: appearance-aware panel backgrounds and layer selection highlighting.
@@ -210,7 +228,7 @@ Existing version 1, 2, and 3 projects remain readable. Projects save as version 
 - `App.swift`: launch, document creation/import, menus, and command validation.
 - `Tests/PaintMacTests`: raster behavior, orientation/transparency, compositing, project validation, saving/export, window ownership, and undo/redo.
 
-Pixel coordinates start at the top left. Layers are stored from bottom to top. A gesture registers one undo snapshot, using Swift Data's copy-on-write storage. Core Image uses Metal when available and falls back to its default renderer. The AppKit canvas currently displays the composited image through Core Graphics; it is not yet a direct-to-drawable Metal canvas.
+Pixel coordinates start at the top left. Layers are stored from bottom to top. A gesture registers one undo snapshot, using Swift Data's copy-on-write storage. Core Image uses Metal when available and falls back to its default renderer. The canvas renders the compositing graph directly into a Metal drawable in premultiplied sRGB, sized to the viewport's backing pixels. Redraw requests are coalesced onto the AppKit run loop, including mouse tracking, and explicitly submit a frame after edits, zoom, pan, resize, and backing-scale changes. Up to three frames can be in flight; completion schedules any pending redraw without blocking input. Cursor and selection overlays and inline text controls remain native AppKit views. Export, sampling, snapshots, and the automatic non-Metal fallback use Core Graphics.
 
 ## Current limits and next steps
 
@@ -218,4 +236,4 @@ This version uses full-image raster buffers, synchronous edits, and up to 40 und
 
 Only Normal layer blending is implemented. Layer styles (shadow/outline/glow), magic wand, gradients, transform handles, pressure-sensitive brushes, plugins, and Paint.NET `.pdn` compatibility are future work. Rectangles and ellipses use native paths for fast drawing even at large thicknesses, with uniform opacity across filled shapes. Native project saves preserve pixels and layers; undo history and the current selection are session state.
 
-The next engineering priorities are tiled image storage, bounded history memory, asynchronous rendering, and a direct Metal canvas. The next editing priorities are magic wand selections and transform handles.
+The next engineering priorities are tiled image storage, bounded history memory, and moving expensive pixel edits off the main thread. The next editing priorities are magic wand selections and transform handles.

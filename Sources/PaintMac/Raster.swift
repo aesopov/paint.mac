@@ -100,13 +100,20 @@ struct Raster: Equatable {
         }
     }
 
-    /// Draws an antialiased capsule. No UI or platform coordinates enter this operation.
+    /// Draw one capsule, optionally with a radial hardness falloff.
     mutating func stroke(from start: CGPoint, to end: CGPoint, size: Double,
                          color: PixelColor, opacity: Double, erase: Bool, clip: CGRect?, selection: SelectionMask? = nil,
-                         antialias: Bool = true) {
+                         antialias: Bool = true, hardness: Double = 1) {
+        strokeSegment(from: start, to: end, size: size, color: color, opacity: opacity, erase: erase,
+                      clip: clip, selection: selection, antialias: antialias, hardness: hardness)
+    }
+
+    mutating func strokeSegment(from start: CGPoint, to end: CGPoint, size: Double,
+                                color: PixelColor, opacity: Double, erase: Bool, clip: CGRect?, selection: SelectionMask?,
+                                antialias: Bool, hardness: Double) {
         let start = antialias ? start : CGPoint(x: floor(start.x) + 0.5, y: floor(start.y) + 0.5)
         let end = antialias ? end : CGPoint(x: floor(end.x) + 0.5, y: floor(end.y) + 0.5)
-        let radius = max(0.5, size / 2)
+        let radius = max(0.5, size / 2), profile = BrushProfile(radius: max(0.5, size / 2), hardness: hardness, antialias: antialias)
         let region = CGRect(x: min(start.x, end.x) - radius - 1,
                             y: min(start.y, end.y) - radius - 1,
                             width: abs(end.x - start.x) + radius * 2 + 2,
@@ -114,39 +121,46 @@ struct Raster: Equatable {
             .integral.intersection(bounds).intersection(clip ?? bounds).intersection(selection?.bounds ?? bounds)
         guard !region.isNull, !region.isEmpty else { return }
         let dx = end.x - start.x, dy = end.y - start.y
-        let lengthSquared = dx * dx + dy * dy
-        let w = width
-        bytes.withUnsafeMutableBytes { ptr in
-            let p = ptr.bindMemory(to: UInt8.self)
-            for y in Int(region.minY)..<Int(region.maxY) {
-                for x in Int(region.minX)..<Int(region.maxX) {
-                    let px = Double(x) + 0.5, py = Double(y) + 0.5
-                    let t = lengthSquared == 0 ? 0 : max(0, min(1, ((px - start.x) * dx + (py - start.y) * dy) / lengthSquared))
-                    let distance = hypot(px - start.x - t * dx, py - start.y - t * dy)
-                    let coverage = antialias ? max(0, min(1, radius + 0.5 - distance)) : (distance <= radius ? 1.0 : 0.0)
-                    let selectionAlpha = selection.map { Double($0.coverage[y * w + x]) / 255 } ?? 1
-                    let alpha = coverage * opacity * Double(color.a) / 255 * selectionAlpha
-                    guard alpha > 0 else { continue }
-                    let i = (y * w + x) * 4
-                    if erase {
-                        for c in 0..<4 { p[i + c] = UInt8((Double(p[i + c]) * (1 - alpha)).rounded()) }
-                    } else {
-                        for (c, value) in [color.r, color.g, color.b].enumerated() {
-                            p[i + c] = UInt8(min(255, (Double(value) * alpha + Double(p[i + c]) * (1 - alpha)).rounded()))
+        let lengthSquared = dx * dx + dy * dy, w = width
+        func render() {
+            bytes.withUnsafeMutableBytes { ptr in
+                let p = ptr.bindMemory(to: UInt8.self)
+                for y in Int(region.minY)..<Int(region.maxY) {
+                    for x in Int(region.minX)..<Int(region.maxX) {
+                        let px = Double(x) + 0.5, py = Double(y) + 0.5, position = y * w + x
+                        let t = lengthSquared == 0 ? 0 : max(0, min(1, ((px - start.x) * dx + (py - start.y) * dy) / lengthSquared))
+                        let distance = hypot(px - start.x - t * dx, py - start.y - t * dy)
+                        let coverage = profile.coverage(at: distance)
+                        let selectionAlpha = selection.map { Double($0.coverage[position]) / 255 } ?? 1
+                        let alpha = coverage * opacity * Double(color.a) / 255 * selectionAlpha
+                        guard alpha > 0 else { continue }
+                        let i = position * 4
+                        if erase {
+                            for c in 0..<4 { p[i + c] = UInt8((Double(p[i + c]) * (1 - alpha)).rounded()) }
+                        } else {
+                            for (c, value) in [color.r, color.g, color.b].enumerated() {
+                                p[i + c] = UInt8(min(255, (Double(value) * alpha + Double(p[i + c]) * (1 - alpha)).rounded()))
+                            }
+                            p[i + 3] = UInt8(min(255, (255 * alpha + Double(p[i + 3]) * (1 - alpha)).rounded()))
                         }
-                        p[i + 3] = UInt8(min(255, (255 * alpha + Double(p[i + 3]) * (1 - alpha)).rounded()))
                     }
                 }
             }
         }
+        render()
     }
 
     /// Rasterize a complete shape once. Quartz handles wide outlines without repeatedly
     /// visiting overlapping brush disks, and applies opacity uniformly around the path.
     mutating func strokeShape(in rect: CGRect, ellipse: Bool, size: Double,
                               color: PixelColor, opacity: Double, clip: CGRect?, selection: SelectionMask? = nil,
-                              antialias: Bool = true, fillColor: PixelColor? = nil) {
+                              antialias: Bool = true, fillColor: PixelColor? = nil, hardness: Double = 1) {
         guard rect.width > 0, rect.height > 0 else { return }
+        if BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness < 1 {
+            strokeSoftShape(in: rect, ellipse: ellipse, size: size, color: color, opacity: opacity, clip: clip,
+                            selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness)
+            return
+        }
         let w = width, h = height
         let area = (clip ?? bounds).intersection(bounds).intersection(selection?.bounds ?? bounds)
         guard !area.isNull, !area.isEmpty else { return }
@@ -483,10 +497,18 @@ final class ImageRenderer {
         let image = LayerImages(renderer: self, layers: layers, bounds: bounds).content(id)
         return context.createCGImage(image, from: bounds, format: .RGBA8, colorSpace: Raster.colorSpace)!
     }
-    func composite(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false) -> CGImage {
+    /// Keep the compositing graph on the GPU path until an export or CPU pixel
+    /// operation explicitly needs a CGImage. The canvas renders this graph directly.
+    func compositeImage(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false) -> CIImage {
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         var image = LayerImages(renderer: self, layers: layers, bounds: bounds).siblings(nil)
         if whiteBackground { image = image.composited(over: CIImage(color: .white).cropped(to: bounds)) }
-        return context.createCGImage(image, from: bounds, format: .RGBA8, colorSpace: Raster.colorSpace)!
+        return image
+    }
+    func cgImage(_ image: CIImage) -> CGImage {
+        context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: Raster.colorSpace)!
+    }
+    func composite(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false) -> CGImage {
+        cgImage(compositeImage(layers, width: width, height: height, whiteBackground: whiteBackground))
     }
 }

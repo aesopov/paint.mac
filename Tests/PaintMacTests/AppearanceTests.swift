@@ -7,6 +7,9 @@ final class AppearanceTests: XCTestCase {
         view.subviews.flatMap { [$0] + descendants($0) }
     }
     private func bitmap(_ view: NSView) throws -> NSBitmapImageRep {
+        if let canvas = descendants(view).compactMap({ $0 as? CanvasView }).first {
+            return try XCTUnwrap(canvas.snapshot(of: view))
+        }
         let result = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: result)
         return result

@@ -253,8 +253,7 @@ final class SelectionTests: XCTestCase {
             hand.scrollToVisible(hand.bounds)
             XCTAssertTrue(root.bounds.contains(hand.convert(hand.bounds, to: root)))
             if size.width == 1320, let path = ProcessInfo.processInfo.environment["PAINTMAC_SELECTION_PREVIEW_PATH"],
-               let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
-                root.cacheDisplay(in: root.bounds, to: bitmap)
+               let bitmap = editor.canvas.snapshot(of: root) {
                 try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
             }
         }

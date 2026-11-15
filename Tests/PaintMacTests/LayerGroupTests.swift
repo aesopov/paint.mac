@@ -389,7 +389,7 @@ final class LayerGroupTests: XCTestCase {
                 XCTAssertTrue(root.bounds.contains(popup.convert(popup.bounds, to: root)))
                 XCTAssertTrue(popup.itemArray.contains { $0.title == "Merge Group" && $0.isEnabled })
                 if let folder = ProcessInfo.processInfo.environment["PAINTMAC_GROUP_PREVIEW_DIR"], size.width == 1320 {
-                    let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds)); root.cacheDisplay(in: root.bounds, to: bitmap)
+                    let bitmap = try XCTUnwrap(editor.canvas.snapshot(of: root))
                     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: folder).appendingPathComponent(theme == .aqua ? "groups-light.png" : "groups-dark.png"))
                 }
             }

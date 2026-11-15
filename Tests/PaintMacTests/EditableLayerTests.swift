@@ -179,7 +179,7 @@ final class EditableLayerTests: XCTestCase {
                 }
                 XCTAssertEqual(doc.state, original)
                 if size.width == 1320, let folder = ProcessInfo.processInfo.environment["PAINTMAC_EDITABLE_PREVIEW_DIR"] {
-                    let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds)); root.cacheDisplay(in: root.bounds, to: bitmap)
+                    let bitmap = try XCTUnwrap(editor.canvas.snapshot(of: root))
                     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: folder).appendingPathComponent(theme == .aqua ? "editable-light.png" : "editable-dark.png"))
                 }
             }

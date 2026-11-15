@@ -18,7 +18,7 @@ extension DocumentState {
     func subtreeIDs(_ id: UUID) -> Set<UUID> {
         Set(layers.filter { $0.id == id || ancestors(of: $0.id).contains(id) }.map(\.id))
     }
-    var canPaintTarget: Bool { activeLayer.isPixelLayer || isEditingMask }
+    var canPaintTarget: Bool { !isEffectivelyLocked(activeID) && (activeLayer.isPixelLayer || isEditingMask) }
     var activeEffectivelyVisible: Bool {
         activeLayer.visible && ancestors(of: activeID).allSatisfy { id in layers.first { $0.id == id }?.visible == true }
     }
@@ -42,19 +42,28 @@ extension DocumentState {
         clippingUnits(parent: activeLayer.parentID).first { $0.contains(activeID) } ?? [activeID]
     }
     var canClipActive: Bool {
+        guard !isEffectivelyLocked(activeID) else { return false }
         if activeLayer.isClipped { return true }
         let units = clippingUnits(parent: activeLayer.parentID)
         guard let index = units.firstIndex(where: { $0.contains(activeID) }), index > 0 else { return false }
         return layers.first { $0.id == units[index - 1][0] }?.effect == nil
     }
     func canReorderActive(by offset: Int) -> Bool {
+        guard !expandedMovingIDs([activeID]).contains(where: isEffectivelyLocked) else { return false }
         let units = clippingUnits(parent: activeLayer.parentID)
         guard let index = units.firstIndex(where: { $0.contains(activeID) }) else { return false }
         return units.indices.contains(index + offset)
     }
-    var canMergeDown: Bool { activeLayer.isClipped || canReorderActive(by: -1) }
+    var mergeDownRoots: [UUID] {
+        let units = clippingUnits(parent: activeLayer.parentID)
+        guard let index = units.firstIndex(where: { $0.contains(activeID) }), activeLayer.isClipped || index > 0 else { return [] }
+        var chosen = activeLayer.isClipped ? [units[index]] : [units[index - 1], units[index]]
+        if chosen.contains(where: { unit in layers.first(where: { $0.id == unit[0] })?.effect != nil }) { chosen = Array(units[0...index]) }
+        return chosen.flatMap { $0 }
+    }
+    var canMergeDown: Bool { !mergeDownRoots.isEmpty && mergeDownRoots.allSatisfy { canModifySubtree($0) } }
     var canUngroupActive: Bool {
-        activeLayer.isGroup && activeLayer.opacity == 1 && activeLayer.mask == nil && !activeLayer.isClipped
+        canModifySubtree(activeID) && activeLayer.isGroup && activeLayer.opacity == 1 && activeLayer.mask == nil && !activeLayer.isClipped
             && activeClippingUnit.count == 1 && activeLayer.visible && !children(of: activeID).isEmpty
             && !children(of: activeID).contains { $0.effect != nil && !$0.isClipped }
     }
@@ -114,6 +123,7 @@ extension DocumentState {
     }
     /// Move a group and all descendants together; masks follow image pixels.
     mutating func moveActive(from before: DocumentState, dx: Int, dy: Int, selection: SelectionMask?) {
+        guard !before.isEffectivelyLocked(before.activeID), before.isEditingMask || before.canModifySubtree(before.activeID) else { return }
         if before.isEditingMask {
             editingRaster = before.editingRaster.moved(dx: dx, dy: dy, selection: selection)
             return
@@ -161,6 +171,7 @@ extension PaintDocument {
         next.activeID = group.id; next.canonicalizeLayers()
         guard next.layers.allSatisfy({ next.ancestors(of: $0.id).count + ($0.isGroup ? 1 : 0) <= DocumentState.maximumGroupDepth }) else { throw LayerTreeError(message: "Groups can be nested up to 8 levels.") }
         try next.validateLayerTree()
+        guard state.permitsLockedLayerChanges(to: next) else { throw LayerTreeError(message: "Unlock the affected layers first.") }
         let previous = state; state = next; commit(previous, name: roots.isEmpty ? "New Group" : "Group Layers")
     }
     func ungroupActive() {
@@ -173,32 +184,10 @@ extension PaintDocument {
             state.canonicalizeLayers()
         }
     }
-    func moveLayers(_ ids: Set<UUID>, into parent: UUID?) throws {
+    func moveLayers(_ ids: Set<UUID>, into parent: UUID?, before sibling: UUID? = nil) throws {
         finishPendingEdits?()
-        var next = state
-        if let parent { guard next.layers.contains(where: { $0.id == parent && $0.isGroup }) else { return } }
-        let roots = next.layers.filter { ids.contains($0.id) && !next.ancestors(of: $0.id).contains(where: ids.contains) }
-        guard !roots.isEmpty else { return }
-        // Carry complete clipping stacks so moving a base never reattaches its
-        // clipped layers to unrelated artwork.
-        var movingRoots = Set<UUID>()
-        for root in roots {
-            let unit = next.clippingUnits(parent: root.parentID).first { $0.contains(root.id) }!
-            movingRoots.formUnion(unit)
-        }
-        movingRoots = Set(movingRoots.filter { !next.ancestors(of: $0).contains(where: movingRoots.contains) })
-        let movingIDs = movingRoots.reduce(into: Set<UUID>()) { $0.formUnion(next.subtreeIDs($1)) }
-        guard parent.map({ !movingIDs.contains($0) }) ?? true else { throw LayerTreeError(message: "A group cannot be moved inside itself or one of its children.") }
-        var moved = next.layers.filter { movingIDs.contains($0.id) }
-        next.layers.removeAll { movingIDs.contains($0.id) }
-        for index in moved.indices where movingRoots.contains(moved[index].id) { moved[index].parentID = parent }
-        let insertion = parent.flatMap { id in next.layers.firstIndex { $0.id == id } } ?? next.layers.count
-        next.layers.insert(contentsOf: moved, at: insertion)
-        if let parent, let index = next.layers.firstIndex(where: { $0.id == parent }) { next.layers[index].expanded = true }
-        next.canonicalizeLayers()
-        guard next.layers.allSatisfy({ next.ancestors(of: $0.id).count + ($0.isGroup ? 1 : 0) <= DocumentState.maximumGroupDepth }) else { throw LayerTreeError(message: "Groups can be nested up to 8 levels.") }
-        try next.validateLayerTree()
-        let previous = state; state = next; commit(previous, name: "Move Layers to Group")
+        let next = try state.relocatingLayers(ids, into: parent, before: sibling)
+        let previous = state; state = next; commit(previous, name: "Move Layers")
     }
     func duplicateActiveNode() throws {
         finishPendingEdits?()
@@ -211,6 +200,7 @@ extension PaintDocument {
             let copies = nodes.map { source -> PaintLayer in
                 var copy = PaintLayer(id: mapping[source.id]!, name: source.id == original.id ? source.name + " copy" : source.name,
                                       raster: source.raster, visible: source.visible, opacity: source.opacity)
+                copy.isLocked = source.isLocked
                 copy.text = source.text; copy.textClip = source.textClip; copy.effect = source.effect
                 copy.mask = source.mask; copy.maskEnabled = source.maskEnabled; copy.isGroup = source.isGroup
                 copy.parentID = source.parentID.map { mapping[$0] ?? $0 }; copy.isClipped = source.isClipped; copy.expanded = source.expanded
@@ -221,18 +211,22 @@ extension PaintDocument {
             state.activeID = mapping[original.id]!
         }
     }
-    func removeActiveNode() {
+    func removeActiveNode() { removeLayers([state.activeID]) }
+    func removeLayers(_ ids: Set<UUID>) {
         finishPendingEdits?()
-        let ids = state.subtreeIDs(state.activeID)
-        guard ids.count < state.layers.count else { return }
-        edit("Delete Layer") { state in
-            let originalIndex = state.activeIndex, node = state.activeLayer
-            if !node.isClipped {
-                let dependents = Set(state.activeClippingUnit.dropFirst())
-                for index in state.layers.indices where dependents.contains(state.layers[index].id) { state.layers[index].isClipped = false }
+        guard state.canRemoveLayers(ids) else { return }
+        edit("Delete Layers") { state in
+            let removed = ids.reduce(into: Set<UUID>()) { $0.formUnion(state.subtreeIDs($1)) }
+            let originalIndex = state.activeIndex
+            for parent in [nil] + state.layers.filter(\.isGroup).map({ Optional($0.id) }) {
+                for unit in state.clippingUnits(parent: parent) where removed.contains(unit[0]) {
+                    for index in state.layers.indices where unit.dropFirst().contains(state.layers[index].id) {
+                        state.layers[index].isClipped = false
+                    }
+                }
             }
-            state.layers.removeAll { ids.contains($0.id) }
-            state.activeID = state.layers[min(originalIndex, state.layers.count - 1)].id
+            state.layers.removeAll { removed.contains($0.id) }
+            if removed.contains(state.activeID) { state.activeID = state.layers[min(originalIndex, state.layers.count - 1)].id }
         }
     }
     func reorderActiveNode(by offset: Int) {
@@ -262,7 +256,7 @@ extension PaintDocument {
     }
     func mergeActiveGroup(forceMask: Bool = false) {
         finishPendingEdits?()
-        guard state.activeLayer.isGroup else { return }
+        guard state.canModifySubtree(state.activeID), state.activeLayer.isGroup else { return }
         var nodes = state.layers
         if forceMask { nodes[state.activeIndex].maskEnabled = true }
         guard let raster = try? Raster(image: renderer.contentImage(of: state.activeID, layers: nodes, width: state.width, height: state.height)) else { return }
@@ -277,12 +271,7 @@ extension PaintDocument {
     func mergeActiveDown(forceMask: Bool = false) {
         finishPendingEdits?()
         guard state.canMergeDown else { return }
-        let units = state.clippingUnits(parent: state.activeLayer.parentID), unitIndex = state.clippingUnits(parent: state.activeLayer.parentID).firstIndex { $0.contains(state.activeID) }!
-        var chosen = state.activeLayer.isClipped ? [units[unitIndex]] : [units[unitIndex - 1], units[unitIndex]]
-        if chosen.contains(where: { unit in state.layers.first(where: { $0.id == unit[0] })?.effect != nil }) {
-            chosen = Array(units[0...unitIndex])
-        }
-        let roots = chosen.flatMap { $0 }
+        let roots = state.mergeDownRoots
         var isolated = state.isolatedLayers(roots: Set(roots))
         if forceMask, let index = isolated.firstIndex(where: { $0.id == state.activeID }) { isolated[index].maskEnabled = true }
         guard let raster = try? Raster(image: renderer.composite(isolated, width: state.width, height: state.height)) else { return }

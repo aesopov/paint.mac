@@ -323,8 +323,7 @@ final class LayerMaskTests: XCTestCase {
                 XCTAssertTrue(menu.itemArray.contains { $0.title == "Invert Mask" && $0.isEnabled })
                 XCTAssertTrue(root.bounds.contains(menu.convert(menu.bounds, to: root)))
                 if let folder = ProcessInfo.processInfo.environment["PAINTMAC_MASK_PREVIEW_DIR"], size.width == 1320 {
-                    let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
-                    root.cacheDisplay(in: root.bounds, to: bitmap)
+                    let bitmap = try XCTUnwrap(editor.canvas.snapshot(of: root))
                     let name = appearance == .aqua ? "mask-light.png" : "mask-dark.png"
                     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: folder).appendingPathComponent(name))
                 }

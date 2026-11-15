@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -14,6 +15,7 @@ struct PaintLayer: Equatable {
     var parentID: UUID?
     var isClipped = false
     var expanded = true
+    var isLocked = false
     var text: TextLayerContent?
     var textClip: SelectionMask?
     var effect: EffectSettings?
@@ -84,6 +86,7 @@ struct ProjectManifest: Codable {
         var expanded: Bool? = nil
         var text: TextLayerContent? = nil
         var textClipFile: String? = nil
+        var isLocked: Bool? = nil
         var effect: EffectSettings? = nil
     }
     var version: Int
@@ -114,6 +117,7 @@ enum ProjectCodec {
                 children[maskFile] = FileWrapper(regularFileWithContents: mask.coverage)
                 record.maskFile = maskFile; record.maskEnabled = layer.maskEnabled
             }
+            record.isLocked = layer.isLocked ? true : nil
             record.text = layer.text; record.effect = layer.effect
             if let clip = layer.textClip {
                 let file = "\(layer.id.uuidString).text-mask"
@@ -122,7 +126,7 @@ enum ProjectCodec {
             }
             layers.append(record)
         }
-        let version = state.layers.contains { $0.text != nil || $0.effect != nil } ? 4 : state.layers.contains { $0.isGroup || $0.parentID != nil || $0.isClipped } ? 3 : (state.layers.contains { $0.mask != nil } ? 2 : 1)
+        let version = state.layers.contains { $0.isLocked } ? 5 : state.layers.contains { $0.text != nil || $0.effect != nil } ? 4 : state.layers.contains { $0.isGroup || $0.parentID != nil || $0.isClipped } ? 3 : (state.layers.contains { $0.mask != nil } ? 2 : 1)
         let manifest = ProjectManifest(version: version, width: state.width, height: state.height,
                                        activeID: state.activeID, layers: layers)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -134,7 +138,7 @@ enum ProjectCodec {
         guard let children = wrapper.fileWrappers,
               let data = children["document.json"]?.regularFileContents else { throw PaintError.invalidProject }
         let manifest = try JSONDecoder().decode(ProjectManifest.self, from: data)
-        guard (1...4).contains(manifest.version), manifest.width > 0, manifest.height > 0,
+        guard (1...5).contains(manifest.version), manifest.width > 0, manifest.height > 0,
               manifest.width <= 8192, manifest.height <= 8192,
               manifest.width * manifest.height <= 32_000_000,
               !manifest.layers.isEmpty, manifest.layers.count <= 32,
@@ -145,6 +149,7 @@ enum ProjectCodec {
             guard layer.opacity.isFinite, (0...1).contains(layer.opacity) else { throw PaintError.invalidProject }
             if manifest.version < 3, layer.isGroup != nil || layer.parentID != nil || layer.isClipped != nil || layer.expanded != nil { throw PaintError.invalidProject }
             if manifest.version < 4, layer.text != nil || layer.textClipFile != nil || layer.effect != nil { throw PaintError.invalidProject }
+            if manifest.version < 5, layer.isLocked != nil { throw PaintError.invalidProject }
             let kinds = (layer.isGroup == true ? 1 : 0) + (layer.text != nil ? 1 : 0) + (layer.effect != nil ? 1 : 0)
             guard kinds <= 1 else { throw PaintError.invalidProject }
             try layer.text?.validate(); try layer.effect?.validate()
@@ -159,6 +164,7 @@ enum ProjectCodec {
             guard raster.width == manifest.width, raster.height == manifest.height else { throw PaintError.invalidProject }
             var decoded = PaintLayer(id: layer.id, name: layer.name, raster: raster,
                                      visible: layer.visible, opacity: layer.opacity)
+            decoded.isLocked = layer.isLocked ?? false
             decoded.text = layer.text; decoded.effect = layer.effect
             if let file = layer.textClipFile {
                 guard layer.text != nil, file == "\(layer.id.uuidString).text-mask", let payload = children[file]?.regularFileContents, payload.count == manifest.width * manifest.height else { throw PaintError.invalidProject }
@@ -211,7 +217,8 @@ final class PaintDocument: NSDocument {
     static let typeName = "com.aesopov.paintmac.project"
     var state = DocumentState()
     let renderer = ImageRenderer()
-    private var imageCache: CGImage?
+    private(set) var imageCache: CGImage?
+    private var compositionCache: CIImage?
     var onChange: (() -> Void)?
     var finishPendingEdits: (() -> Void)?
     var icnsSource: ICNSSource?
@@ -233,12 +240,19 @@ final class PaintDocument: NSDocument {
 
     var composite: CGImage {
         if let imageCache { return imageCache }
-        let image = renderer.composite(state.layers, width: state.width, height: state.height)
+        let image = renderer.cgImage(compositeImage)
         imageCache = image
         return image
     }
 
-    func invalidate() { imageCache = nil; onChange?() }
+    var compositeImage: CIImage {
+        if let compositionCache { return compositionCache }
+        let image = renderer.compositeImage(state.layers, width: state.width, height: state.height)
+        compositionCache = image
+        return image
+    }
+
+    func invalidate() { imageCache = nil; compositionCache = nil; onChange?() }
 
     /// Register once per user gesture; pixel Data is copied only on mutation.
     func commit(_ previous: DocumentState, name: String) {
@@ -256,10 +270,11 @@ final class PaintDocument: NSDocument {
         invalidate()
     }
 
-    func edit(_ name: String, _ change: (inout DocumentState) -> Void) {
+    func edit(_ name: String, protectLockedLayers: Bool = true, _ change: (inout DocumentState) -> Void) {
         finishPendingEdits?()
         let previous = state
         change(&state)
+        if protectLockedLayers && !previous.permitsLockedLayerChanges(to: state) { state = previous; return }
         commit(previous, name: name)
     }
 

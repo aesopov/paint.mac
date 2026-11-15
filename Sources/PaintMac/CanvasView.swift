@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 
 enum PaintTool: String, CaseIterable {
     case brush, eraser, selection, ellipseSelect, lasso, move, fill, eyedropper, line, rectangle, ellipse, text, crop, hand
@@ -77,8 +78,9 @@ enum PaintTool: String, CaseIterable {
 
 final class CanvasView: NSView, NSEditor {
     let paintDocument: PaintDocument
-    var tool: PaintTool = .brush { willSet { if newValue != tool { finishText() } } didSet { window?.invalidateCursorRects(for: self); needsDisplay = true } }
+    var tool: PaintTool = .brush { willSet { if newValue != tool { finishText() } } didSet { window?.invalidateCursorRects(for: self); overlays.needsDisplay = true } }
     var brushSize: Double = 18
+    var brushHardness: Double = 1
     var brushOpacity: Double = 1 { didSet { updateTextAppearance() } }
     var smooth = true { didSet { updateTextAppearance() } }
     var fillShapes = false
@@ -106,10 +108,16 @@ final class CanvasView: NSView, NSEditor {
     private var textReediting = false
     private var textDraftClip: SelectionMask?
     var onTextSettingsChange: (() -> Void)?
-    var effectPreviewComposite: CGImage? { didSet { needsDisplay = true } }
+    var effectPreviewImage: CIImage? { didSet { needsDisplay = true } }
+    var effectPreviewComposite: CGImage? { effectPreviewImage.map { paintDocument.renderer.cgImage($0) } }
     private(set) var textPreviewRaster: Raster?
-    private var textPreviewComposite: CGImage?
-    var displayedComposite: CGImage { textPreviewComposite ?? effectPreviewComposite ?? paintDocument.composite }
+    private var textPreviewImage: CIImage?
+    var displayedImage: CIImage { textPreviewImage ?? effectPreviewImage ?? paintDocument.compositeImage }
+    /// CPU pixels are requested only for export, sampling, snapshots, or fallback.
+    var displayedComposite: CGImage {
+        if let preview = textPreviewImage ?? effectPreviewImage { return paintDocument.renderer.cgImage(preview) }
+        return paintDocument.composite
+    }
     private var textColor = PixelColor.black
     private var textUsesAlternate = false
     private var gestureTravel: CGFloat = 0
@@ -128,6 +136,10 @@ final class CanvasView: NSView, NSEditor {
     private var panStart = CGPoint.zero
     private var isPanning = false
     private var gestureActive = false
+    private var softBrushStroke: SoftBrushStroke?
+    private var gestureHardness: Double = 1
+    private var gestureRaster: Raster?
+    private var gestureCreatedLayerID: UUID?
     private var gestureButton = 0
     private var cancelledGestureButtons = Set<Int>()
     private var gestureColor = PixelColor.black
@@ -136,19 +148,59 @@ final class CanvasView: NSView, NSEditor {
     private var pointer: CGPoint?
     private var tracking: NSTrackingArea?
     private var didFit = false
+    private(set) var metalView: MetalCanvasView?
+    private let overlays = CanvasOverlayView()
+    private var snapshotRendering = false
 
-    init(document: PaintDocument) {
+    override var needsDisplay: Bool {
+        willSet {
+            // A layer-backed NSView can report false immediately after accepting
+            // an invalidation. Forward the requested value, not that getter.
+            if newValue {
+                if !snapshotRendering { metalView?.requestRedraw() }
+                overlays.needsDisplay = true
+            }
+        }
+    }
+
+    init(document: PaintDocument, useMetal: Bool = true) {
         paintDocument = document
         super.init(frame: .zero)
         wantsLayer = true
         clipsToBounds = true
         layer?.masksToBounds = true
         layer?.borderWidth = 1
+        if useMetal, let renderer = MetalCanvasRenderer(renderer: document.renderer) {
+            let view = MetalCanvasView(renderer: renderer)
+            view.imageProvider = { [weak self] size in
+                guard let self else { return CIImage.empty() }
+                return CanvasViewport.image(self.displayedImage, imageRect: self.imageRect,
+                                            viewSize: self.bounds.size, drawableSize: size, nearest: self.zoom >= 1)
+            }
+            view.onFailure = { [weak self] in self?.disableMetal() }
+            metalView = view; addSubview(view)
+        }
+        overlays.canvas = self; overlays.wantsLayer = true; overlays.setAccessibilityElement(false)
+        addSubview(overlays)
         updateViewportBorder()
         setAccessibilityLabel("Image canvas")
         setAccessibilityRole(.image)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    private func disableMetal() {
+        metalView?.removeFromSuperview(); metalView = nil; needsDisplay = true
+    }
+    /// AppKit's layer-cache snapshots omit Metal drawable contents. Materialize
+    /// the image only for the duration of an explicit offscreen snapshot, then
+    /// restore the transparent background beneath the live Metal surface.
+    func snapshot(of view: NSView? = nil) -> NSBitmapImageRep? {
+        let target = view ?? self
+        snapshotRendering = true; needsDisplay = true; displayIfNeeded()
+        defer { snapshotRendering = false; needsDisplay = true; displayIfNeeded() }
+        guard let bitmap = target.bitmapImageRepForCachingDisplay(in: target.bounds) else { return nil }
+        target.cacheDisplay(in: target.bounds, to: bitmap)
+        return bitmap
+    }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     override func viewDidChangeEffectiveAppearance() {
@@ -171,7 +223,11 @@ final class CanvasView: NSView, NSEditor {
 
     override func layout() {
         super.layout()
-        if !didFit && bounds.width > 100 { didFit = true; zoomToFit() }
+        if let metalView, metalView.frame != bounds {
+            metalView.frame = bounds; metalView.requestRedraw()
+        }
+        overlays.frame = bounds
+        if !didFit && bounds.width > 100 && bounds.height > 100 { didFit = true; zoomToFit() }
         layoutTextEditor()
     }
 
@@ -201,8 +257,14 @@ final class CanvasView: NSView, NSEditor {
         guard selection?.id != cachedSelectionID else { return }
         cachedSelectionID = selection?.id
         selectionOutline = selection?.outline()
-        selectionImage = selection?.cgImage
-        needsDisplay = true; onSelectionChange?()
+        // An image mask uses zero for opaque and 255 for transparent, allowing
+        // us to shade excluded pixels over either a Metal or AppKit background.
+        selectionImage = selection.flatMap {
+            CGImage(maskWidth: $0.width, height: $0.height, bitsPerComponent: 8, bitsPerPixel: 8,
+                    bytesPerRow: $0.width, provider: CGDataProvider(data: $0.coverage as CFData)!,
+                    decode: nil, shouldInterpolate: true)
+        }
+        overlays.needsDisplay = true; onSelectionChange?()
     }
 
     func changeSelection(_ mask: SelectionMask?, name: String) {
@@ -235,18 +297,29 @@ final class CanvasView: NSView, NSEditor {
                 }
             }
         }
-        ctx.interpolationQuality = zoom >= 3 ? .none : .high
-        ctx.translateBy(x: rect.minX, y: rect.maxY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(displayedComposite, in: CGRect(origin: .zero, size: rect.size))
+        if snapshotRendering || metalView == nil || NSGraphicsContext.current?.isDrawingToScreen == false {
+            ctx.interpolationQuality = zoom >= 1 ? .none : .high
+            ctx.translateBy(x: rect.minX, y: rect.maxY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(displayedComposite, in: CGRect(origin: .zero, size: rect.size))
+        }
         ctx.restoreGState()
+    }
 
+    func drawOverlays() {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState(); defer { ctx.restoreGState() }
+        ctx.clip(to: bounds)
+        let rect = imageRect
         if let selection {
             synchronizeSelection()
             ctx.saveGState(); ctx.clip(to: rect)
             ctx.translateBy(x: rect.minX, y: rect.maxY); ctx.scaleBy(x: zoom, y: -zoom)
-            ctx.setBlendMode(.multiply); ctx.setAlpha(0.18)
-            if let selectionImage { ctx.draw(selectionImage, in: selection.canvasBounds) }
+            if let selectionImage {
+                ctx.clip(to: selection.canvasBounds, mask: selectionImage)
+                ctx.setFillColor(NSColor.black.withAlphaComponent(0.18).cgColor)
+                ctx.fill(selection.canvasBounds)
+            }
             ctx.restoreGState()
             if let selectionOutline {
                 ctx.saveGState(); ctx.clip(to: rect)
@@ -285,9 +358,9 @@ final class CanvasView: NSView, NSEditor {
         let p = toImage(pointer!)
         if imageRect.contains(pointer!) { onStatus?("x \(Int(floor(p.x)))   y \(Int(floor(p.y)))") }
         else { onStatus?(tool.help) }
-        needsDisplay = true
+        overlays.needsDisplay = true
     }
-    override func mouseExited(with event: NSEvent) { pointer = nil; needsDisplay = true; onStatus?(tool.help) }
+    override func mouseExited(with event: NSEvent) { pointer = nil; overlays.needsDisplay = true; onStatus?(tool.help) }
 
     override func mouseDown(with event: NSEvent) {
         let button = mouseButton(for: event)
@@ -337,6 +410,10 @@ final class CanvasView: NSView, NSEditor {
             gestureActive = false
             return
         }
+        guard !paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID),
+              tool != .move || paintDocument.state.isEditingMask || paintDocument.state.canModifySubtree(paintDocument.state.activeID) else {
+            gestureActive = false; onStatus?("Unlock the layer or group before editing it."); NSSound.beep(); return
+        }
         guard paintDocument.state.activeEffectivelyVisible else {
             gestureActive = false
             onStatus?("Show the selected layer before editing it."); NSSound.beep(); return
@@ -345,11 +422,25 @@ final class CanvasView: NSView, NSEditor {
            text.rect.contains(point), (tool == .text || event.clickCount == 2) {
             gestureActive = false; editTextLayer(); return
         }
+        let before = paintDocument.state
+        if before.activeLayer.isGroup, !before.isEditingMask, [.brush, .fill, .line, .rectangle, .ellipse].contains(tool) {
+            guard before.layers.count < 32 else {
+                gestureActive = false; onStatus?("The layer limit is 32. Select an existing image layer to paint."); NSSound.beep(); return
+            }
+            let layer = PaintLayer(name: "Layer \(before.layers.count)", raster: Raster(width: before.width, height: before.height))
+            paintDocument.state.insertLayer(layer)
+            gestureCreatedLayerID = layer.id
+            onStatus?("Painting on a new layer inside \(before.activeLayer.name).")
+        }
         guard paintDocument.state.canPaintTarget || tool == .move || tool == .text else {
-            gestureActive = false; onStatus?("Choose an image layer or mask to paint. Text layers can be rasterized from the Layer menu."); return
+            gestureActive = false; onStatus?(before.activeLayer.isGroup ? "Groups have no pixels to erase. Select an image layer or the group mask." : "Choose an image layer or mask to paint. Text layers can be rasterized from the Layer menu."); return
         }
         if tool == .text { textUsesAlternate = alternate; return }
-        gestureState = paintDocument.state
+        gestureState = before
+        gestureRaster = paintDocument.state.editingRaster
+        gestureHardness = BrushProfile(radius: 1, hardness: brushHardness, antialias: smooth).hardness
+        if gestureHardness < 1, tool == .brush || tool == .eraser { softBrushStroke = SoftBrushStroke(original: paintDocument.state.editingRaster) }
+        if gestureCreatedLayerID != nil { paintDocument.invalidate() }
         switch tool {
         case .brush, .eraser: paint(from: point, to: point)
         case .fill:
@@ -391,7 +482,7 @@ final class CanvasView: NSView, NSEditor {
             if let gestureSelection { selection = gestureSelection.translated(dx: dx, dy: dy) }
             paintDocument.invalidate()
         case .line, .rectangle, .ellipse:
-            paintDocument.state.editingRaster = before.editingRaster
+            paintDocument.state.editingRaster = gestureRaster ?? before.editingRaster
             if tool == .line {
                 if event.modifierFlags.contains(.shift) {
                     let angle = (atan2(point.y - gestureStart.y, point.x - gestureStart.x) / (.pi / 4)).rounded() * (.pi / 4)
@@ -412,7 +503,7 @@ final class CanvasView: NSView, NSEditor {
                 paintDocument.state.editRaster { $0.strokeShape(
                     in: rect, ellipse: tool == .ellipse, size: brushSize,
                     color: gestureColor, opacity: brushOpacity, clip: nil, selection: selection,
-                    antialias: smooth, fillColor: gestureFillColor) }
+                    antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness) }
                 paintDocument.invalidate()
             }
         default: break
@@ -461,17 +552,31 @@ final class CanvasView: NSView, NSEditor {
 
     private func paint(from a: CGPoint, to b: CGPoint, invalidate: Bool = true) {
         let selection = self.selection
-        paintDocument.state.editRaster { $0.stroke(from: a, to: b, size: brushSize, color: gestureColor,
-                                                  opacity: brushOpacity, erase: tool == .eraser, clip: nil, selection: selection, antialias: smooth) }
+        paintDocument.state.editRaster { raster in
+            if softBrushStroke != nil, tool == .brush || tool == .eraser {
+                softBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
+                                       opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth, hardness: gestureHardness)
+            } else {
+                raster.stroke(from: a, to: b, size: brushSize, color: gestureColor, opacity: brushOpacity,
+                              erase: tool == .eraser, clip: nil, selection: selection, antialias: smooth, hardness: gestureHardness)
+            }
+        }
         if invalidate { paintDocument.invalidate() }
     }
     private func finishGesture() {
-        if let before = gestureState { paintDocument.commit(before, name: tool.title) }
-        gestureState = nil
+        if let before = gestureState {
+            if gestureCreatedLayerID == paintDocument.state.activeID, paintDocument.state.editingRaster == gestureRaster {
+                // An empty selection, zero opacity, or a shape click should
+                // not leave an empty layer behind or consume the redo stack.
+                paintDocument.state = before; paintDocument.invalidate()
+            } else { paintDocument.commit(before, name: tool.title) }
+        }
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil
     }
     private func cancelGesture() {
         let before = gestureState
-        gestureState = nil; gestureSelection = nil; gestureActive = false
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil
+        gestureSelection = nil; gestureActive = false
         lassoPoints = []; textBoxPreview = nil; gestureTravel = 0
         if isPanning {
             pan = panStart; isPanning = false; NSCursor.pop()
@@ -509,7 +614,7 @@ final class CanvasView: NSView, NSEditor {
 
     func beginText(in rect: CGRect, color: PixelColor) {
         finishText()
-        guard paintDocument.state.activeEffectivelyVisible else { return }
+        guard !paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID), paintDocument.state.activeEffectivelyVisible else { return }
         textReediting = false; textAddsLayer = false; draftTextLayer = nil
         textEditsMask = paintDocument.state.isEditingMask
         textDraftClip = selection
@@ -528,7 +633,7 @@ final class CanvasView: NSView, NSEditor {
 
     func editTextLayer() {
         finishText()
-        guard paintDocument.state.activeEffectivelyVisible, let value = paintDocument.state.activeLayer.text else { return }
+        guard !paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID), paintDocument.state.activeEffectivelyVisible, let value = paintDocument.state.activeLayer.text else { return }
         paintDocument.state.editingMask = false; paintDocument.invalidate()
         tool = .text; textEditsMask = false; textReediting = true; textAddsLayer = false
         textLayerID = paintDocument.state.activeID; draftTextLayer = paintDocument.state.activeLayer
@@ -599,7 +704,7 @@ final class CanvasView: NSView, NSEditor {
             } else if let index = layers.firstIndex(where: { $0.id == layer.id }) { layers[index] = layer }
         }
         textPreviewRaster = raster
-        textPreviewComposite = paintDocument.renderer.composite(layers, width: paintDocument.state.width, height: paintDocument.state.height)
+        textPreviewImage = paintDocument.renderer.compositeImage(layers, width: paintDocument.state.width, height: paintDocument.state.height)
         needsDisplay = true
     }
 
@@ -609,7 +714,7 @@ final class CanvasView: NSView, NSEditor {
         if apply { refreshTextPreview() }
         let content = currentTextContent(), layerID = textLayerID, raster = textPreviewRaster, editsMask = textEditsMask
         let adds = textAddsLayer, reediting = textReediting, draftLayer = draftTextLayer, clip = textDraftClip
-        textEditor = nil; textLayerID = nil; textPreviewRaster = nil; textPreviewComposite = nil; draftTextLayer = nil; textDraftClip = nil
+        textEditor = nil; textLayerID = nil; textPreviewRaster = nil; textPreviewImage = nil; draftTextLayer = nil; textDraftClip = nil
         window?.makeFirstResponder(self); editor.removeFromSuperview(); needsDisplay = true
         defer { paintDocument.objectDidEndEditing(self) }
         guard apply, let content, (!content.string.isEmpty || reediting), let raster else { return }

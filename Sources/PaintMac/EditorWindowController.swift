@@ -32,17 +32,6 @@ private final class LayerScrollView: NSScrollView {
     }
 }
 
-private final class ToolButton: NSButton {
-    var selected = false { didSet { needsDisplay = true; contentTintColor = selected ? .white : .secondaryLabelColor } }
-    override func draw(_ dirtyRect: NSRect) {
-        if selected {
-            NSColor.controlAccentColor.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8).fill()
-        }
-        super.draw(dirtyRect)
-    }
-}
-
 private final class SwatchButton: NSButton {
     private let normalColor: PixelColor
     private let maskShade: UInt8
@@ -78,7 +67,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     let canvas: CanvasView
     private let layoutPreferences: UserDefaults
     private var toolButtons: [PaintTool: ToolButton] = [:]
+    private var toolGroupButtons: [ToolGroup: ToolGroupButton] = [:]
     private let toolTitle = label("Brush", size: 13, weight: .semibold)
+    private let hardnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let hardnessValue = label("100%", size: 11, color: .secondaryLabelColor)
+    private var hardnessOptions: NSStackView!
     private let sizeValue = label("18 px", size: 11, color: .secondaryLabelColor)
     private let sizeSlider = NSSlider(value: 18, minValue: 1, maxValue: 300, target: nil, action: nil)
     private let opacitySlider = NSSlider(value: 100, minValue: 1, maxValue: 100, target: nil, action: nil)
@@ -88,7 +81,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let alternateColorWell = NSColorWell()
     private let hexField = NSTextField(string: "#4075F5")
     private let alternateHexField = NSTextField(string: "#FFFFFF")
-    private let layerTable = NSTableView()
+    private let layerTable = LayerTableView()
+    private let layerTrash = LayerTrashButton(frame: .zero)
     private var displayedLayerIDs: [UUID] = []
     private let structureButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let layerOpacity = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
@@ -178,22 +172,30 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         ])
 
         var tools: [NSView] = []
-        for (index, tool) in PaintTool.allCases.enumerated() {
-            let button = ToolButton(image: NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.title)!, target: self, action: #selector(toolClicked(_:)))
-            button.tag = index; button.isBordered = false; button.imagePosition = .imageOnly
-            button.imageScaling = .scaleProportionallyDown
-            button.toolTip = "\(tool.title) (\(tool.key.uppercased()))"
-            button.setAccessibilityLabel(tool.title)
+        let railTools: [PaintTool] = [.brush, .eraser, .selection, .move, .fill, .eyedropper, .rectangle, .text, .crop, .hand]
+        for tool in railTools {
+            let button: ToolButton
+            if let group = ToolGroup.allCases.first(where: { $0.tools[0] == tool }) {
+                let grouped = ToolGroupButton(group: group)
+                grouped.onChoose = { [weak self] in self?.selectTool($0) }
+                toolGroupButtons[group] = grouped; button = grouped
+            } else {
+                button = ToolButton(image: NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.title)!, target: self, action: #selector(toolClicked(_:)))
+                button.tag = PaintTool.allCases.firstIndex(of: tool)!; button.isBordered = false; button.imagePosition = .imageOnly
+                button.imageScaling = .scaleProportionallyDown
+                button.toolTip = "\(tool.title) (\(tool.key.uppercased()))"; button.setAccessibilityLabel(tool.title)
+                toolButtons[tool] = button
+            }
             button.widthAnchor.constraint(equalToConstant: 38).isActive = true
             button.heightAnchor.constraint(equalToConstant: 34).isActive = true
-            tools.append(button); toolButtons[tool] = button
+            tools.append(button)
         }
         let toolStack = stack(tools, spacing: 4)
         let toolScroll = NSScrollView()
         toolScroll.drawsBackground = false; toolScroll.hasVerticalScroller = true
         toolScroll.autohidesScrollers = true; toolScroll.scrollerStyle = .overlay
         toolScroll.clipsToBounds = true; toolScroll.contentView.clipsToBounds = true
-        let toolDocument = ToolRailView(frame: CGRect(x: 0, y: 0, width: 60, height: PaintTool.allCases.count * 38 + 24))
+        let toolDocument = ToolRailView(frame: CGRect(x: 0, y: 0, width: 60, height: tools.count * 38 + 24))
         toolStack.translatesAutoresizingMaskIntoConstraints = false; toolDocument.addSubview(toolStack)
         toolScroll.documentView = toolDocument
         toolScroll.translatesAutoresizingMaskIntoConstraints = false; rail.addSubview(toolScroll)
@@ -202,8 +204,14 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
                                      toolStack.topAnchor.constraint(equalTo: toolDocument.topAnchor, constant: 14),
                                      toolStack.centerXAnchor.constraint(equalTo: toolDocument.centerXAnchor)])
 
-        brushOptions = stack([label("Size", size: 11, color: .secondaryLabelColor), sizeSlider, sizeValue], vertical: false, spacing: 12)
-        opacityOptions = stack([label("Opacity", size: 11, color: .secondaryLabelColor), opacitySlider, opacityValue], vertical: false, spacing: 12)
+        brushOptions = stack([label("Size", size: 11, color: .secondaryLabelColor), sizeSlider, sizeValue], vertical: false, spacing: 8)
+        opacityOptions = stack([label("Opacity", size: 11, color: .secondaryLabelColor), opacitySlider, opacityValue], vertical: false, spacing: 8)
+        hardnessOptions = stack([label("Hardness", size: 11, color: .secondaryLabelColor), hardnessSlider, hardnessValue], vertical: false, spacing: 6)
+        hardnessSlider.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        hardnessValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
+        hardnessSlider.target = self; hardnessSlider.action = #selector(hardnessChanged); hardnessSlider.isContinuous = true
+        hardnessSlider.setAccessibilityLabel("Brush hardness")
+        hardnessSlider.toolTip = "100%: hard edge. 0%: gradual fade. Applies to brush, eraser, lines, and shape outlines. Independent of antialiasing."
         selectionModePopup.addItems(withTitles: SelectionMode.allCases.map(\.rawValue))
         selectionModePopup.target = self; selectionModePopup.action = #selector(selectionModeChanged)
         selectionModePopup.setAccessibilityLabel("Selection combine mode")
@@ -227,12 +235,12 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         shapeFill.target = self; shapeFill.action = #selector(shapeFillChanged)
         shapeFill.setAccessibilityLabel("Fill shapes")
         shapeFill.toolTip = "Left mouse: main outline, alternate fill. Right mouse: alternate outline, main fill."
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, edgeMode, shapeFill], vertical: false, spacing: 12)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeFill], vertical: false, spacing: 10)
         optionStack.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(optionStack)
-        toolTitle.widthAnchor.constraint(equalToConstant: 116).isActive = true
-        sizeSlider.widthAnchor.constraint(equalToConstant: 118).isActive = true
+        toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        sizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
         sizeValue.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        opacitySlider.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        opacitySlider.widthAnchor.constraint(equalToConstant: 72).isActive = true
         sizeSlider.target = self; sizeSlider.action = #selector(brushChanged); sizeSlider.isContinuous = true
         opacitySlider.target = self; opacitySlider.action = #selector(brushChanged); opacitySlider.isContinuous = true
         sizeSlider.setAccessibilityLabel("Brush size")
@@ -316,8 +324,22 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         layerTable.selectionHighlightStyle = .regular
         layerTable.allowsMultipleSelection = true
         layerTable.delegate = self; layerTable.dataSource = self
-        layerTable.target = self; layerTable.doubleAction = #selector(editLayerContent)
+        layerTable.target = self; layerTable.action = #selector(layerRowClicked)
+        layerTable.doubleAction = #selector(layerRowDoubleClicked)
         layerTable.setAccessibilityLabel("Layers")
+        layerTable.registerForDraggedTypes([LayerTableView.pasteboardType])
+        layerTable.setDraggingSourceOperationMask(.move, forLocal: true)
+        layerTable.onDelete = { [weak self] in self?.removeLayer() }
+        layerTrash.sourceTable = layerTable
+        layerTrash.canDelete = { [weak self] ids in self?.paintDocument.state.canRemoveLayers(ids) == true }
+        layerTrash.deleteLayers = { [weak self] ids in self?.paintDocument.removeLayers(ids) }
+        layerTrash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)
+        layerTrash.target = self; layerTrash.action = #selector(removeLayer)
+        layerTrash.isBordered = false; layerTrash.contentTintColor = .secondaryLabelColor
+        layerTrash.toolTip = "Delete selected layers (Delete), or drop layers here"
+        layerTrash.setAccessibilityLabel("Delete Layer")
+        layerTrash.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        layerTrash.heightAnchor.constraint(equalToConstant: 28).isActive = true
         let scroll = LayerScrollView(); scroll.documentView = layerTable; scroll.hasVerticalScroller = true
         scroll.drawsBackground = false; scroll.translatesAutoresizingMaskIntoConstraints = false
         inspector.addSubview(scroll)
@@ -326,7 +348,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             iconButton("square.on.square", help: "Duplicate Layer", action: #selector(duplicateLayer)),
             iconButton("arrow.up", help: "Move Layer Up", action: #selector(layerUp)),
             iconButton("arrow.down", help: "Move Layer Down", action: #selector(layerDown)),
-            iconButton("trash", help: "Delete Layer", action: #selector(removeLayer))
+            layerTrash
         ]
         let layerActions = stack(buttons, vertical: false, spacing: 9)
         mergeDownButton.target = self; mergeDownButton.action = #selector(mergeSelected)
@@ -414,7 +436,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let ids = Set(layerTable.selectedRowIndexes.compactMap { displayedLayerIDs.indices.contains($0) ? displayedLayerIDs[$0] : nil })
         return ids.isEmpty ? [paintDocument.state.activeID] : ids
     }
-    func refresh(selectedIDs requested: Set<UUID>? = nil) {
+    func refresh(selectedIDs requested: Set<UUID>? = nil, updateRows: Bool = true) {
         let previousSelection = requested ?? selectedLayerIDs
         refreshing = true
         defer { refreshing = false }
@@ -432,18 +454,23 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.synchronizeSelection()
         featherButton.isEnabled = canvas.selection?.isEmpty == false
         toolButtons[.crop]?.isEnabled = canvas.selection?.isEmpty == false
-        let signature = ["\(state.width)x\(state.height)-\(state.activeID)-\(state.isEditingMask)"] + state.layers.map { "\($0.id)-\($0.name)-\($0.visible)-\($0.opacity)-\($0.mask != nil)-\($0.maskEnabled)-\($0.parentID?.uuidString ?? "root")-\($0.isGroup)-\($0.expanded)-\($0.isClipped)-\($0.text != nil)-\($0.effect?.kind.rawValue ?? "")" }
-        if signature != lastLayers {
-            lastLayers = signature
-            layerTable.reloadData()
-        } else {
-            // Update only the active thumbnail during a brush gesture.
-            if let row = displayedLayerIDs.firstIndex(of: state.activeID) {
-                layerTable.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+        let signature = ["\(state.width)x\(state.height)-\(state.activeID)-\(state.isEditingMask)"] + state.layers.map { "\($0.id)-\($0.name)-\($0.visible)-\($0.opacity)-\($0.mask != nil)-\($0.maskEnabled)-\($0.parentID?.uuidString ?? "root")-\($0.isGroup)-\($0.expanded)-\($0.isClipped)-\($0.isLocked)-\($0.text != nil)-\($0.effect?.kind.rawValue ?? "")" }
+        if updateRows {
+            if signature != lastLayers {
+                lastLayers = signature
+                layerTable.reloadData()
+            } else {
+                // Update only the active thumbnail during a brush gesture.
+                if let row = displayedLayerIDs.firstIndex(of: state.activeID) {
+                    layerTable.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+                }
             }
         }
         let selection = previousSelection.contains(state.activeID) ? previousSelection : [state.activeID]
-        layerTable.selectRowIndexes(IndexSet(displayedLayerIDs.indices.filter { selection.contains(displayedLayerIDs[$0]) }), byExtendingSelection: false)
+        let selectedRows = IndexSet(displayedLayerIDs.indices.filter { selection.contains(displayedLayerIDs[$0]) })
+        if layerTable.selectedRowIndexes != selectedRows { layerTable.selectRowIndexes(selectedRows, byExtendingSelection: false) }
+        layerOpacity.isEnabled = !state.isEffectivelyLocked(state.activeID)
+        layerTrash.isEnabled = state.canRemoveLayers(selectedLayerIDs)
         layerOpacity.doubleValue = state.activeLayer.opacity * 100
         layerOpacityLabel.stringValue = "\(Int(layerOpacity.doubleValue.rounded()))%"
         layerCount.stringValue = "\(state.layers.count)"
@@ -460,7 +487,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let state = paintDocument.state
         mergeDownButton.title = state.activeLayer.isGroup ? "Merge Group" : (state.activeLayer.effect != nil ? "Merge Below" : "Merge Down")
         mergeDownButton.setAccessibilityLabel(mergeDownButton.title)
-        mergeDownButton.isEnabled = state.activeLayer.isGroup || state.canMergeDown
+        mergeDownButton.isEnabled = state.activeLayer.isGroup ? state.canModifySubtree(state.activeID) : state.canMergeDown
         mergeDownButton.toolTip = state.activeLayer.isGroup ? "Merge this group's visible contents into one layer" : "Merge with the lower sibling, including clipping stacks and any input layers needed by an effect (⇧⌘M)"
     }
 
@@ -485,9 +512,15 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         selectionOptions.isHidden = !tool.isSelection
         textOptions.isHidden = tool != .text
         opacityOptions.isHidden = !tool.isPainting
+        hardnessOptions.isHidden = ![.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
         edgeMode.isHidden = !(tool.isPainting || tool.isSelection)
         shapeFill.isHidden = tool != .rectangle && tool != .ellipse
         for (key, button) in toolButtons { button.selected = key == tool }
+        for (group, button) in toolGroupButtons {
+            button.dismissFlyout()
+            if group.tools.contains(tool) { button.setCurrentTool(tool) }
+            button.selected = group.tools.contains(tool)
+        }
         status.stringValue = tool.help
         window?.makeFirstResponder(canvas)
     }
@@ -530,6 +563,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         colorWell.color = canvas.color.nsColor; hexField.stringValue = canvas.color.hex
     }
     @objc func editLayerContent() {
+        let state = paintDocument.state
+        guard !state.isEffectivelyLocked(state.activeID) || (state.activeLayer.text == nil && state.activeLayer.effect == nil) else { return }
         if paintDocument.state.activeLayer.text != nil { canvas.editTextLayer() }
         else if let settings = paintDocument.state.activeLayer.effect { showEffect(settings, editing: paintDocument.state.activeID) }
         else { renameLayer() }
@@ -541,7 +576,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     }
     func showEffect(_ settings: EffectSettings, editing id: UUID? = nil) {
         canvas.finishText()
-        guard effectDialog == nil, id != nil || paintDocument.state.layers.count < 32 else { return }
+        guard id.map({ !paintDocument.state.isEffectivelyLocked($0) }) ?? true, effectDialog == nil, id != nil || paintDocument.state.layers.count < 32 else { return }
         let baseline = paintDocument.state
         let dialog = EffectLayerDialog(settings: settings); effectDialog = dialog
         dialog.onPreview = { [weak self] settings in
@@ -552,17 +587,17 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
                 var layer = PaintLayer(name: settings.kind.title, raster: Raster(width: preview.width, height: preview.height))
                 layer.effect = settings; layer.mask = preview.selection; preview.insertLayer(layer)
             }
-            self.canvas.effectPreviewComposite = self.paintDocument.renderer.composite(preview.layers, width: preview.width, height: preview.height)
+            self.canvas.effectPreviewImage = self.paintDocument.renderer.compositeImage(preview.layers, width: preview.width, height: preview.height)
         }
         dialog.onApply = { [weak self] settings in
             guard let self else { return }
-            self.canvas.effectPreviewComposite = nil
+            self.canvas.effectPreviewImage = nil
             do {
                 if let id { try self.paintDocument.setEffect(settings, on: id) }
                 else { try self.paintDocument.addEffect(settings) }
             } catch { self.showError(error) }
         }
-        dialog.onClose = { [weak self] in self?.canvas.effectPreviewComposite = nil; self?.effectDialog = nil }
+        dialog.onClose = { [weak self] in self?.canvas.effectPreviewImage = nil; self?.effectDialog = nil }
         dialog.show(for: window!)
     }
     private func effectMenu() -> NSMenu {
@@ -641,8 +676,29 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             self.paintDocument.featherLayerMask(radius: field.doubleValue)
         }
     }
+    private var clickedThumbnail: LayerThumbnailButton? {
+        guard let event = NSApp.currentEvent, event.type == .leftMouseUp || event.type == .leftMouseDown,
+              displayedLayerIDs.indices.contains(layerTable.clickedRow),
+              let cell = layerTable.view(atColumn: 0, row: layerTable.clickedRow, makeIfNecessary: false) else { return nil }
+        func thumbnail(in view: NSView) -> LayerThumbnailButton? {
+            if let button = view as? LayerThumbnailButton, button.bounds.contains(button.convert(event.locationInWindow, from: nil)) { return button }
+            return view.subviews.lazy.compactMap { thumbnail(in: $0) }.first
+        }
+        return thumbnail(in: cell)
+    }
+    @objc private func layerRowClicked() {
+        guard NSApp.currentEvent?.modifierFlags.intersection([.command, .shift]).isEmpty == true,
+              let button = clickedThumbnail else { return }
+        selectLayerTarget(button.layerID, mask: button.editsMask)
+        window?.makeFirstResponder(layerTable)
+    }
+    @objc private func layerRowDoubleClicked() {
+        if let button = clickedThumbnail { selectLayerTarget(button.layerID, mask: button.editsMask); if button.editsMask { return } }
+        editLayerContent()
+    }
     @objc private func thumbnailClicked(_ sender: LayerThumbnailButton) {
         selectLayerTarget(sender.layerID, mask: sender.editsMask)
+        window?.makeFirstResponder(layerTable)
         if !sender.editsMask, NSApp.currentEvent?.clickCount == 2 { editLayerContent() }
     }
     func selectLayerTarget(_ id: UUID, mask: Bool) {
@@ -670,6 +726,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     func invertSelection() {
         guard let mask = canvas.selection else { return }
         canvas.changeSelection(mask.inverted(), name: "Invert Selection")
+    }
+    @objc private func hardnessChanged() {
+        canvas.brushHardness = hardnessSlider.doubleValue / 100
+        hardnessValue.stringValue = "\(Int(hardnessSlider.doubleValue.rounded()))%"
+        canvas.needsDisplay = true
     }
     @objc private func brushChanged() { updateBrushControls(); if canvas.textEditor != nil { canvas.focusText() } }
     private func updateBrushControls() {
@@ -745,7 +806,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         NSLayoutConstraint.activate([text.heightAnchor.constraint(equalToConstant: 32), text.widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
                                      name.topAnchor.constraint(equalTo: text.topAnchor), name.heightAnchor.constraint(equalToConstant: 16),
                                      detail.bottomAnchor.constraint(equalTo: text.bottomAnchor), detail.heightAnchor.constraint(equalToConstant: 12)])
-        var elements: [NSView] = []
+        var elements: [NSView] = [eye]
         if layer.isGroup {
             let disclosure = NSButton(image: NSImage(systemSymbolName: layer.expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)!, target: self, action: #selector(toggleGroupDisclosure(_:)))
             disclosure.isBordered = false; disclosure.contentTintColor = .secondaryLabelColor; disclosure.tag = index
@@ -758,12 +819,21 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             marker.contentTintColor = .secondaryLabelColor; marker.widthAnchor.constraint(equalToConstant: 10).isActive = true
             elements.append(marker)
         }
-        elements += [eye, image]
+        elements.append(image)
         if layer.mask != nil {
             elements.append(LayerThumbnailButton(layer: layer, mask: true, selected: active && state.isEditingMask,
                                                  target: self, action: #selector(thumbnailClicked(_:))))
         }
         elements.append(text)
+        let locked = state.isEffectivelyLocked(layer.id)
+        let lock = NSButton(image: NSImage(systemSymbolName: locked ? "lock.fill" : "lock.open", accessibilityDescription: nil)!, target: self, action: #selector(toggleLockButton(_:)))
+        lock.isBordered = false; lock.tag = index
+        lock.contentTintColor = locked ? .labelColor : .tertiaryLabelColor
+        lock.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        lock.setAccessibilityLabel("\(layer.isLocked ? "Unlock" : "Lock") \(layer.name)")
+        lock.isEnabled = !state.ancestors(of: layer.id).contains(where: state.isEffectivelyLocked)
+        lock.toolTip = lock.isEnabled ? "\(layer.isLocked ? "Unlock" : "Lock") layer content, mask, position, and deletion" : "Locked by a parent group"
+        elements.append(lock)
         let rowStack = stack(elements, vertical: false, spacing: 4)
         rowStack.distribution = .fill
         rowStack.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(rowStack)
@@ -773,6 +843,56 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
                                      rowStack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
         return cell
     }
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard displayedLayerIDs.indices.contains(row) else { return nil }
+        let id = displayedLayerIDs[row]
+        guard !paintDocument.state.expandedMovingIDs(selectedLayerIDs.union([id])).contains(where: paintDocument.state.isEffectivelyLocked) else { return nil }
+        let item = NSPasteboardItem(); item.setString(id.uuidString, forType: LayerTableView.pasteboardType); return item
+    }
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+        let ids = Set(rowIndexes.compactMap { displayedLayerIDs.indices.contains($0) ? displayedLayerIDs[$0] : nil })
+        guard let first = rowIndexes.compactMap({ displayedLayerIDs.indices.contains($0) ? displayedLayerIDs[$0] : nil }).first else { return }
+        canvas.finishText()
+        if !ids.contains(paintDocument.state.activeID) { paintDocument.state.activeID = first }
+        layerTable.selectRowIndexes(rowIndexes, byExtendingSelection: false)
+        refresh(selectedIDs: ids, updateRows: false)
+        window?.makeFirstResponder(layerTable)
+    }
+    /// Translate a visual top-to-bottom boundary into a sibling insertion in
+    /// canonical bottom-to-top storage. A drop on a group appends inside it.
+    func layerDropDestination(row: Int, operation: NSTableView.DropOperation) -> (parent: UUID?, before: UUID?)? {
+        let state = paintDocument.state
+        guard (0...displayedLayerIDs.count).contains(row) else { return nil }
+        if operation == .on {
+            guard displayedLayerIDs.indices.contains(row), let node = state.layers.first(where: { $0.id == displayedLayerIDs[row] }), node.isGroup else { return nil }
+            return (node.id, nil)
+        }
+        if row == displayedLayerIDs.count { return (nil, state.children(of: nil).first?.id) }
+        guard let node = state.layers.first(where: { $0.id == displayedLayerIDs[row] }) else { return nil }
+        let units = state.clippingUnits(parent: node.parentID)
+        guard let index = units.firstIndex(where: { $0.contains(node.id) }) else { return nil }
+        return (node.parentID, index + 1 < units.count ? units[index + 1][0] : nil)
+    }
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+        guard (info.draggingSource as? NSTableView) === layerTable,
+              let destination = layerDropDestination(row: row, operation: operation) else { return [] }
+        let ids = LayerTableView.draggedIDs(info.draggingPasteboard)
+        guard !ids.isEmpty, (try? paintDocument.state.relocatingLayers(ids, into: destination.parent, before: destination.before)) != nil else { return [] }
+        if operation == .above, displayedLayerIDs.indices.contains(row),
+           let node = paintDocument.state.layers.first(where: { $0.id == displayedLayerIDs[row] }),
+           let top = paintDocument.state.clippingUnits(parent: node.parentID).first(where: { $0.contains(node.id) })?.last,
+           let boundary = displayedLayerIDs.firstIndex(of: top) { tableView.setDropRow(boundary, dropOperation: .above) }
+        return .move
+    }
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation operation: NSTableView.DropOperation) -> Bool {
+        guard self.tableView(tableView, validateDrop: info, proposedRow: row, proposedDropOperation: operation) == .move,
+              let destination = layerDropDestination(row: row, operation: operation) else { return false }
+        let ids = LayerTableView.draggedIDs(info.draggingPasteboard)
+        do {
+            try paintDocument.moveLayers(ids, into: destination.parent, before: destination.before)
+            refresh(selectedIDs: ids); window?.makeFirstResponder(layerTable); return true
+        } catch { return false }
+    }
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !refreshing, displayedLayerIDs.indices.contains(layerTable.selectedRow) else { return }
         let ids = selectedLayerIDs
@@ -781,8 +901,14 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let selectedID = displayedLayerIDs[row]
         canvas.finishText()
         paintDocument.state.activeID = selectedID
-        refresh(selectedIDs: ids)
-        window?.makeFirstResponder(canvas)
+        refresh(selectedIDs: ids, updateRows: false)
+        // Reloading rows inside mouseDown destroys AppKit's drag tracking.
+        // Update selection immediately and refresh controls after tracking ends.
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in
+            guard let self, self.paintDocument.state.activeID == selectedID, self.selectedLayerIDs == ids else { return }
+            self.refresh(selectedIDs: ids)
+        }
+        window?.makeFirstResponder(layerTable)
     }
     @objc private func toggleLayer(_ sender: NSButton) {
         guard paintDocument.state.layers.indices.contains(sender.tag) else { return }
@@ -804,7 +930,12 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         }
     }
     @objc func duplicateLayer() { do { try paintDocument.duplicateActiveNode() } catch { showError(error) } }
-    @objc func removeLayer() { paintDocument.removeActiveNode() }
+    @objc func removeLayer() { paintDocument.removeLayers(selectedLayerIDs) }
+    @objc func toggleLayerLock() { paintDocument.toggleLayerLock(paintDocument.state.activeID) }
+    @objc private func toggleLockButton(_ sender: NSButton) {
+        guard paintDocument.state.layers.indices.contains(sender.tag) else { return }
+        paintDocument.toggleLayerLock(paintDocument.state.layers[sender.tag].id)
+    }
     @objc func layerUp() { paintDocument.reorderActiveNode(by: 1) }
     @objc func layerDown() { paintDocument.reorderActiveNode(by: -1) }
     @objc func renameLayer() {
@@ -838,14 +969,15 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; item.isEnabled = enabled; menu.addItem(item)
         }
         let effect = NSMenuItem(title: "New Effect Layer", action: nil, keyEquivalent: ""); effect.submenu = effectMenu(); menu.addItem(effect)
-        command("Edit Text / Effect…", #selector(editLayerContent), enabled: state.activeLayer.text != nil || state.activeLayer.effect != nil)
-        command("Rasterize Text Layer", #selector(rasterizeTextLayer), enabled: state.activeLayer.text != nil)
+        command(state.activeLayer.isLocked ? "Unlock Layer" : "Lock Layer", #selector(toggleLayerLock), enabled: !state.ancestors(of: state.activeID).contains(where: state.isEffectivelyLocked))
+        command("Edit Text / Effect…", #selector(editLayerContent), enabled: !state.isEffectivelyLocked(state.activeID) && (state.activeLayer.text != nil || state.activeLayer.effect != nil))
+        command("Rasterize Text Layer", #selector(rasterizeTextLayer), enabled: !state.isEffectivelyLocked(state.activeID) && state.activeLayer.text != nil)
         menu.addItem(.separator())
         command("New Group", #selector(newGroup), enabled: state.layers.count < 32)
         command("Group Selected Layers (⌘G)", #selector(groupSelected), enabled: state.layers.count < 32)
         command("Ungroup (⇧⌘G)", #selector(ungroup), enabled: state.canUngroupActive)
         menu.items.last?.toolTip = "Ungroup requires a visible 100% group without a mask, clipping, or unconfined effects. Merge Group preserves its appearance."
-        command("Merge Group", #selector(mergeGroup), enabled: state.activeLayer.isGroup)
+        command("Merge Group", #selector(mergeGroup), enabled: state.activeLayer.isGroup && state.canModifySubtree(state.activeID))
         menu.addItem(.separator())
         command(state.activeLayer.isClipped ? "Release Clipping Mask (⌥⌘G)" : "Create Clipping Mask (⌥⌘G)", #selector(toggleClipping), enabled: state.canClipActive)
         menu.addItem(.separator())
@@ -867,7 +999,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     func cropToSelection() {
         guard let selection = canvas.selection, !selection.isEmpty else { return }
         let rect = selection.bounds
-        paintDocument.edit("Crop to Selection") { state in
+        paintDocument.edit("Crop to Selection", protectLockedLayers: false) { state in
             for i in state.layers.indices {
                 state.layers[i].raster = state.layers[i].raster.cropped(to: rect)
                 if var text = state.layers[i].text {
