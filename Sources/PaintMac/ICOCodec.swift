@@ -116,6 +116,7 @@ enum ICOCodec {
     }
 
     private static func makeEntry(_ raster: Raster) throws -> ICOFile.Entry {
+        let raster = try raster.converted(to: .standard)
         guard (1...256).contains(raster.width), (1...256).contains(raster.height) else { throw ICOError.invalidSize }
         let png = raster.width == 256 || raster.height == 256
         let payload = try png ? ProjectCodec.imageData(raster.cgImage, type: UTType.png.identifier) : encodeBitmap(raster)

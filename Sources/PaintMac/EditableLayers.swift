@@ -21,8 +21,8 @@ struct TextLayerContent: Equatable, Codable {
               abs(rect.minX) <= 131072, abs(rect.minY) <= 131072,
               rect.width > 0, rect.height > 0, rect.width <= 32768, rect.height <= 32768 else { throw PaintError.invalidProject }
     }
-    func rendered(width: Int, height: Int, clip: SelectionMask?) -> Raster {
-        var raster = Raster(width: width, height: height)
+    func rendered(width: Int, height: Int, clip: SelectionMask?, format: RGBFormat = .standard) -> Raster {
+        var raster = Raster(width: width, height: height, format: format)
         raster.drawText(string, in: rect, font: style.font, color: color, opacity: opacity,
                         antialias: antialias, selection: clip, horizontalScale: horizontalScale)
         return raster
@@ -76,7 +76,7 @@ struct EffectSettings: Equatable, Codable {
 extension PaintLayer {
     var isPixelLayer: Bool { !isGroup && text == nil && effect == nil }
     mutating func rasterizeText() { text = nil; textClip = nil }
-    mutating func renderText() { if let text { raster = text.rendered(width: raster.width, height: raster.height, clip: textClip) } }
+    mutating func renderText() { if let text { raster = text.rendered(width: raster.width, height: raster.height, clip: textClip, format: raster.format) } }
 }
 
 extension PaintDocument {
@@ -89,7 +89,7 @@ extension PaintDocument {
         finishPendingEdits?(); try settings.validate()
         guard state.layers.count < 32 else { throw PaintError.tooManyLayers }
         edit("Add Effect Layer") { state in
-            var layer = PaintLayer(name: settings.kind.title, raster: Raster(width: state.width, height: state.height))
+            var layer = PaintLayer(name: settings.kind.title, raster: Raster(width: state.width, height: state.height, format: state.format))
             layer.effect = settings; layer.mask = state.selection
             state.insertLayer(layer); state.selection = nil
         }

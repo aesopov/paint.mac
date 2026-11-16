@@ -59,7 +59,7 @@ final class LayerThumbnailButton: NSButton {
             let scale = min(1, min(80 / CGFloat(raster.width), 64 / CGFloat(raster.height)))
             let size = CGSize(width: max(1, ceil(CGFloat(raster.width) * scale)), height: max(1, ceil(CGFloat(raster.height) * scale)))
             let pixels = raster.ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let image = Self.previewContext.createCGImage(pixels, from: CGRect(origin: .zero, size: size), format: .RGBA8, colorSpace: Raster.colorSpace)!
+            let image = Self.previewContext.createCGImage(pixels, from: CGRect(origin: .zero, size: size), format: .RGBA8, colorSpace: RGBProfile.displayP3.space)!
             preview = NSImage(cgImage: image, size: size)
         }
         super.init(frame: .zero)

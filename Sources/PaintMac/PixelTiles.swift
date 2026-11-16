@@ -8,7 +8,7 @@ final class PixelTile {
     let channels: Int
     let side: Int
     private let lock = NSLock()
-    private var imageCache: CGImage?
+    private var imageCache: [RGBProfile: CGImage] = [:]
     private var conversion: PixelTile?
     private weak var origin: PixelTile?
     init(_ data: Data, channels: Int, id: UUID = UUID()) {
@@ -37,11 +37,12 @@ final class PixelTile {
         let result = PixelTile(output, channels: target); result.origin = self
         conversion = result; return result
     }
-    var image: CGImage {
+    var image: CGImage { image(in: .sRGB) }
+    func image(in profile: RGBProfile) -> CGImage {
         lock.lock(); defer { lock.unlock() }
-        if let imageCache { return imageCache }
+        if let cached = imageCache[profile] { return cached }
         let rgba: Data
-        if channels == 4 { rgba = data }
+        if channels == 4 || channels == 8 { rgba = data }
         else {
             var expanded = Data(count: data.count * 4)
             expanded.withUnsafeMutableBytes { raw in
@@ -52,11 +53,12 @@ final class PixelTile {
             }
             rgba = expanded
         }
-        let image = CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
-                            bytesPerRow: side * 4, space: Raster.colorSpace,
-                            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+        let depth: RGBDepth = channels == 8 ? .sixteen : .eight
+        let image = CGImage(width: side, height: side, bitsPerComponent: depth.rawValue, bitsPerPixel: depth.rawValue * 4,
+                            bytesPerRow: side * depth.bytesPerPixel, space: profile.space,
+                            bitmapInfo: CGBitmapInfo(rawValue: depth.bitmapInfo),
                             provider: CGDataProvider(data: rgba as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
-        imageCache = image; return image
+        imageCache[profile] = image; return image
     }
 }
 
@@ -67,6 +69,7 @@ struct TileGrid: Equatable {
     let width: Int
     let height: Int
     let channels: Int
+    var profile: RGBProfile = .sRGB
     var base: [UInt8]
     var tiles: [Int: PixelTile] = [:]
     var tileSide: Int { min(Self.side, max(width, height)) }
@@ -165,7 +168,7 @@ struct TileGrid: Equatable {
         var data = read(region); body(&data, region); write(data, in: region)
     }
     static func == (a: Self, b: Self) -> Bool {
-        guard a.width == b.width, a.height == b.height, a.channels == b.channels else { return false }
+        guard a.width == b.width, a.height == b.height, a.channels == b.channels, a.profile == b.profile else { return false }
         if a.base != b.base { return a.read() == b.read() }
         for key in Set(a.tiles.keys).union(b.tiles.keys) {
             if a.tiles[key] === b.tiles[key] { continue }
@@ -175,11 +178,16 @@ struct TileGrid: Equatable {
     /// Nonoverlapping source images are assembled on the document pixel grid.
     /// The intermediate prevents fractional viewport filtering at tile edges.
     var ciImage: CIImage {
-        let alpha = Double(base[channels == 4 ? 3 : 0]) / 255
-        let color = channels == 1 ? CIColor(red: 1, green: 1, blue: 1, alpha: alpha) :
-            CIColor(red: alpha > 0 ? Double(base[0]) / 255 / alpha : 0,
-                    green: alpha > 0 ? Double(base[1]) / 255 / alpha : 0,
-                    blue: alpha > 0 ? Double(base[2]) / 255 / alpha : 0, alpha: alpha)
+        func component(_ c: Int) -> Double {
+            channels == 8 ? Double(UInt16(base[c * 2]) | UInt16(base[c * 2 + 1]) << 8) / 65535 : Double(base[c]) / 255
+        }
+        let alpha = component(channels == 1 ? 0 : 3)
+        let color: CIColor
+        if channels == 1 { color = CIColor(red: 1, green: 1, blue: 1, alpha: alpha) }
+        else {
+            let components = (0..<3).map { alpha > 0 ? component($0) / alpha : 0 } + [alpha]
+            color = CIColor(cgColor: CGColor(colorSpace: profile.space, components: components.map { CGFloat($0) })!)
+        }
         let solid = CIImage(color: color)
         guard !tiles.isEmpty else { return solid.cropped(to: bounds) }
         var result = CIImage(color: .clear).cropped(to: bounds)
@@ -193,7 +201,7 @@ struct TileGrid: Equatable {
                     result = solid.cropped(to: rect).composited(over: result)
                 }
                 if tx < columns, let tile = tiles[ty * columns + tx] {
-                    let image = CIImage(cgImage: tile.image).transformed(by: CGAffineTransform(translationX: CGFloat(tx * tileSide), y: CGFloat(height - (ty + 1) * tileSide))).cropped(to: bounds)
+                    let image = CIImage(cgImage: tile.image(in: profile)).transformed(by: CGAffineTransform(translationX: CGFloat(tx * tileSide), y: CGFloat(height - (ty + 1) * tileSide))).cropped(to: bounds)
                     result = image.composited(over: result)
                 }
                 next = tx + 1

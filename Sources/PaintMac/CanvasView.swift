@@ -109,13 +109,13 @@ final class CanvasView: NSView, NSEditor {
     private var textDraftClip: SelectionMask?
     var onTextSettingsChange: (() -> Void)?
     var effectPreviewImage: CIImage? { didSet { needsDisplay = true } }
-    var effectPreviewComposite: CGImage? { effectPreviewImage.map { paintDocument.renderer.cgImage($0) } }
+    var effectPreviewComposite: CGImage? { effectPreviewImage.map { paintDocument.renderer.cgImage($0, format: paintDocument.state.format) } }
     private(set) var textPreviewRaster: Raster?
     private var textPreviewImage: CIImage?
     var displayedImage: CIImage { textPreviewImage ?? effectPreviewImage ?? paintDocument.compositeImage }
     /// CPU pixels are requested only for export, sampling, snapshots, or fallback.
     var displayedComposite: CGImage {
-        if let preview = textPreviewImage ?? effectPreviewImage { return paintDocument.renderer.cgImage(preview) }
+        if let preview = textPreviewImage ?? effectPreviewImage { return paintDocument.renderer.cgImage(preview, format: paintDocument.state.format) }
         return paintDocument.composite
     }
     private var textColor = PixelColor.black
@@ -427,7 +427,7 @@ final class CanvasView: NSView, NSEditor {
             guard before.layers.count < 32 else {
                 gestureActive = false; onStatus?("The layer limit is 32. Select an existing image layer to paint."); NSSound.beep(); return
             }
-            let layer = PaintLayer(name: "Layer \(before.layers.count)", raster: Raster(width: before.width, height: before.height))
+            let layer = PaintLayer(name: "Layer \(before.layers.count)", raster: Raster(width: before.width, height: before.height, format: before.format))
             paintDocument.state.insertLayer(layer)
             gestureCreatedLayerID = layer.id
             onStatus?("Painting on a new layer inside \(before.activeLayer.name).")
@@ -623,7 +623,7 @@ final class CanvasView: NSView, NSEditor {
             let active = paintDocument.state.activeLayer
             let empty = active.isPixelLayer && active.raster.isTransparent
             guard empty || paintDocument.state.layers.count < 32 else { onStatus?("This version supports up to 32 layers and groups."); NSSound.beep(); return }
-            draftTextLayer = empty ? active : PaintLayer(name: "Text", raster: Raster(width: paintDocument.state.width, height: paintDocument.state.height))
+            draftTextLayer = empty ? active : PaintLayer(name: "Text", raster: Raster(width: paintDocument.state.width, height: paintDocument.state.height, format: paintDocument.state.format))
             textAddsLayer = !empty; textLayerID = draftTextLayer!.id
         }
         textColor = textEditsMask ? color.maskColor : color
@@ -697,7 +697,7 @@ final class CanvasView: NSView, NSEditor {
             raster = pixels; layers[index].mask = SelectionMask(editingRaster: pixels)
         } else {
             guard var layer = draftTextLayer, let content = currentTextContent() else { return }
-            raster = content.rendered(width: paintDocument.state.width, height: paintDocument.state.height, clip: textDraftClip)
+            raster = content.rendered(width: paintDocument.state.width, height: paintDocument.state.height, clip: textDraftClip, format: paintDocument.state.format)
             layer.text = content; layer.raster = raster; layer.textClip = textDraftClip
             if textAddsLayer {
                 var preview = paintDocument.state; preview.insertLayer(layer); layers = preview.layers

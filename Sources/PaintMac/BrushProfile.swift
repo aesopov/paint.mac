@@ -53,6 +53,7 @@ struct SoftBrushStroke {
         // including short segments, so event frequency cannot change coverage.
         guard !points.isEmpty else { return }
         let bounds = raster.bounds.intersection(selection?.bounds ?? raster.bounds)
+        let depth = raster.depth, colors = color.components(in: raster.format.profile)
         let columns = raster.storage.columns, side = raster.storage.tileSide
         var touched = Set<Int>()
         for point in points {
@@ -71,9 +72,9 @@ struct SoftBrushStroke {
             raster.storage.edit(in: tileRegion) { data, region in
                 accumulated.withUnsafeMutableBufferPointer { mask in
                     sourceData.withUnsafeBytes { sourceRaw in
-                        let source = sourceRaw.bindMemory(to: UInt8.self)
+                        let source = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: sourceRaw), depth: depth)
                         data.withUnsafeMutableBytes { raw in
-                            let pixels = raw.bindMemory(to: UInt8.self), rw = Int(region.width)
+                            let pixels = RGBSamples(raw: raw, depth: depth), rw = Int(region.width)
                             for point in points {
                                 let r = CGRect(x: point.x - dab.radius, y: point.y - dab.radius, width: 2 * dab.radius, height: 2 * dab.radius).integral.intersection(region)
                                 guard !r.isNull, !r.isEmpty else { continue }
@@ -83,16 +84,16 @@ struct SoftBrushStroke {
                                     let value = dab.coverage(distanceSquared: sx * sx + sy * sy)
                                     guard value > 0, mask[m] < 1 else { continue }
                                     mask[m] += value * (1 - mask[m])
-                                    let coverage = Double((mask[m] * 255).rounded()) / 255
+                                    let coverage = depth == .eight ? Double((mask[m] * 255).rounded()) / 255 : Double(mask[m])
                                     let alpha = coverage * opacity * Double(color.a) / 255 * Double(selectionData?[position] ?? 255) / 255
                                     let i = position * 4
                                     if erase {
-                                        for c in 0..<4 { pixels[i + c] = UInt8((Double(source[i + c]) * (1 - alpha)).rounded()) }
+                                        for c in 0..<4 { pixels[i + c] = source[i + c] * (1 - alpha) }
                                     } else {
-                                        for (c, channel) in [color.r, color.g, color.b].enumerated() {
-                                            pixels[i + c] = UInt8(min(255, (Double(channel) * alpha + Double(source[i + c]) * (1 - alpha)).rounded()))
+                                        for (c, channel) in colors.enumerated() {
+                                            pixels[i + c] = channel * pixels.maximum * alpha + source[i + c] * (1 - alpha)
                                         }
-                                        pixels[i + 3] = UInt8(min(255, (255 * alpha + Double(source[i + 3]) * (1 - alpha)).rounded()))
+                                        pixels[i + 3] = pixels.maximum * alpha + source[i + 3] * (1 - alpha)
                                     }
                                 } }
                             }
@@ -173,9 +174,10 @@ extension Raster {
         }
         guard let outline = mask(fill: false) else { return }
         let fill = fillColor.flatMap { _ in mask(fill: true) }
+        let depth = depth, strokeColors = color.components(in: format.profile), fillColors = (fillColor ?? .clear).components(in: format.profile)
         let ox = Int(region.minX), oy = Int(region.minY)
         editPixels(in: region) { raw, _ in
-            let pixels = raw.bindMemory(to: UInt8.self)
+            let pixels = RGBSamples(raw: raw, depth: depth)
             for y in 0..<rh { for x in 0..<rw {
                 let m = y * rw + x, i = m * 4
                 let strokeAlpha = Double(outline[m]) / 255 * Double(color.a) / 255
@@ -184,13 +186,12 @@ extension Raster {
                 guard alpha > 0 else { continue }
                 let strength = opacity * Double(selection?.value(x: x + ox, y: y + oy) ?? 255) / 255
                 let applied = alpha * strength
-                let fillColor = fillColor ?? .clear
-                let channels = [(color.r, fillColor.r), (color.g, fillColor.g), (color.b, fillColor.b)]
+                let channels = Array(zip(strokeColors, fillColors))
                 for (c, values) in channels.enumerated() {
-                    let source = (Double(values.0) * strokeAlpha + Double(values.1) * fillAlpha) * strength
-                    pixels[i + c] = UInt8(max(0, min(255, (source + Double(pixels[i + c]) * (1 - applied)).rounded())))
+                    let source = (values.0 * strokeAlpha + values.1 * fillAlpha) * strength * pixels.maximum
+                    pixels[i + c] = source + pixels[i + c] * (1 - applied)
                 }
-                pixels[i + 3] = UInt8(max(0, min(255, (255 * applied + Double(pixels[i + 3]) * (1 - applied)).rounded())))
+                pixels[i + 3] = pixels.maximum * applied + pixels[i + 3] * (1 - applied)
             } }
         }
     }

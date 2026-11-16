@@ -200,10 +200,12 @@ final class HistorySnapshot {
     struct Grid {
         let width: Int, height: Int, channels: Int
         let base: [UInt8]
+        let profile: RGBProfile
         let tiles: [Int: UUID]
-        init(_ grid: TileGrid) { width = grid.width; height = grid.height; channels = grid.channels; base = grid.base; tiles = grid.tiles.mapValues(\.id) }
+        init(_ grid: TileGrid) { width = grid.width; height = grid.height; channels = grid.channels; profile = grid.profile; base = grid.base; tiles = grid.tiles.mapValues(\.id) }
         func restored(_ cache: HistoryTileCache) throws -> TileGrid {
             var grid = TileGrid(width: width, height: height, channels: channels, base: base)
+            grid.profile = profile
             grid.tiles = try tiles.mapValues { try cache.tile($0, channels: channels) }; return grid
         }
     }
@@ -230,12 +232,13 @@ final class HistorySnapshot {
             let layer = state.layers[i]
             collect(layer.raster.storage)
             if let mask = layer.mask { collect(mask.storage) }; if let clip = layer.textClip { collect(clip.storage) }
-            metadata.layers[i].raster = Raster(width: state.width, height: state.height)
+            metadata.layers[i].raster = Raster(width: state.width, height: state.height, format: layer.raster.format)
+            metadata.layers[i].raster.resolution = layer.raster.resolution
             metadata.layers[i].mask = nil; metadata.layers[i].textClip = nil
         }
         if let mask = state.selection { collect(mask.storage) }; metadata.selection = nil
         ids = Set(tiles.keys); tiles.values.forEach(cache.retain)
-        metadataBytes = tiles.count * 48 + state.layers.reduce(256) { $0 + 256 + $1.name.utf8.count + ($1.text?.string.utf8.count ?? 0) }
+        metadataBytes = state.format.profile.icc.count + tiles.count * 48 + state.layers.reduce(256) { $0 + 256 + $1.name.utf8.count + ($1.text?.string.utf8.count ?? 0) }
     }
     func restored() throws -> DocumentState {
         var state = metadata

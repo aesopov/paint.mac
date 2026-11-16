@@ -91,7 +91,23 @@ extension PaintDocument {
 final class LayerTableView: NSTableView {
     static let pasteboardType = NSPasteboard.PasteboardType("com.aesopov.paintmac.layer")
     var onDelete: (() -> Void)?
+    var contextMenuProvider: ((Int) -> NSMenu?)?
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        guard row >= 0 else { return nil }
+        return contextMenuProvider?(row)
+    }
+    override func accessibilityPerformShowMenu() -> Bool { showSelectedRowMenu() }
+    @discardableResult private func showSelectedRowMenu() -> Bool {
+        guard selectedRow >= 0, let menu = contextMenuProvider?(selectedRow) else { return false }
+        let rect = rect(ofRow: selectedRow)
+        menu.popUp(positioning: nil, at: NSPoint(x: rect.minX + 20, y: rect.midY), in: self)
+        return true
+    }
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 109, event.modifierFlags.intersection([.command, .control, .option, .shift]) == .shift {
+            showSelectedRowMenu(); return
+        }
         if (event.keyCode == 51 || event.keyCode == 117), event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             onDelete?(); return
         }

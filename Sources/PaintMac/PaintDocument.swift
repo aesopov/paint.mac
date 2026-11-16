@@ -37,16 +37,18 @@ struct PaintLayer: Equatable {
 struct DocumentState: Equatable {
     var width: Int
     var height: Int
+    var format = RGBFormat.standard
+    var resolution = ImageResolution.standard
     /// Bottom to top, matching the order used for compositing.
     var layers: [PaintLayer]
     var activeID: UUID { didSet { if activeID != oldValue { editingMask = false } } }
     var editingMask = false
     var selection: SelectionMask? = nil
 
-    init(width: Int = 1200, height: Int = 800) {
-        self.width = width; self.height = height
-        let background = PaintLayer(name: "Background", raster: Raster(width: width, height: height, color: .white))
-        let layer = PaintLayer(name: "Layer 1", raster: Raster(width: width, height: height))
+    init(width: Int = 1200, height: Int = 800, format: RGBFormat = .standard, resolution: ImageResolution = .standard) {
+        self.width = width; self.height = height; self.format = format; self.resolution = resolution
+        let background = PaintLayer(name: "Background", raster: Raster(width: width, height: height, color: .white, format: format))
+        let layer = PaintLayer(name: "Layer 1", raster: Raster(width: width, height: height, format: format))
         layers = [background, layer]; activeID = layer.id
     }
 
@@ -94,17 +96,22 @@ struct ProjectManifest: Codable {
     var height: Int
     var activeID: UUID
     var layers: [Layer]
+    var format: RGBFormat? = nil
+    var resolution: ImageResolution? = nil
 }
 
 enum ProjectCodec {
     static func encode(_ state: DocumentState) throws -> FileWrapper {
         try state.validateLayerTree()
+        try state.format.validate(); try state.resolution.validate()
+        let extended = state.format != .standard || state.resolution != .standard
         var children: [String: FileWrapper] = [:]
         var layers: [ProjectManifest.Layer] = []
         for layer in state.layers {
-            let filename = (layer.isGroup || layer.effect != nil) ? "" : "\(layer.id.uuidString).png"
+            let filename = (layer.isGroup || layer.effect != nil) ? "" : "\(layer.id.uuidString).\(extended ? "rgba" : "png")"
             if !layer.isGroup && layer.effect == nil {
-                let data = try imageData(layer.raster.cgImage, type: UTType.png.identifier)
+                guard layer.raster.format == state.format else { throw PaintError.invalidProject }
+                let data = try extended ? layer.raster.bytes : imageData(layer.raster.cgImage, type: UTType.png.identifier)
                 children[filename] = FileWrapper(regularFileWithContents: data)
             }
             var record = ProjectManifest.Layer(id: layer.id, name: layer.name, visible: layer.visible,
@@ -126,9 +133,10 @@ enum ProjectCodec {
             }
             layers.append(record)
         }
-        let version = state.layers.contains { $0.isLocked } ? 5 : state.layers.contains { $0.text != nil || $0.effect != nil } ? 4 : state.layers.contains { $0.isGroup || $0.parentID != nil || $0.isClipped } ? 3 : (state.layers.contains { $0.mask != nil } ? 2 : 1)
-        let manifest = ProjectManifest(version: version, width: state.width, height: state.height,
+        let version = extended ? 6 : state.layers.contains { $0.isLocked } ? 5 : state.layers.contains { $0.text != nil || $0.effect != nil } ? 4 : state.layers.contains { $0.isGroup || $0.parentID != nil || $0.isClipped } ? 3 : (state.layers.contains { $0.mask != nil } ? 2 : 1)
+        var manifest = ProjectManifest(version: version, width: state.width, height: state.height,
                                        activeID: state.activeID, layers: layers)
+        manifest.format = extended ? state.format : nil; manifest.resolution = extended ? state.resolution : nil
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         children["document.json"] = FileWrapper(regularFileWithContents: try encoder.encode(manifest))
         return FileWrapper(directoryWithFileWrappers: children)
@@ -138,12 +146,16 @@ enum ProjectCodec {
         guard let children = wrapper.fileWrappers,
               let data = children["document.json"]?.regularFileContents else { throw PaintError.invalidProject }
         let manifest = try JSONDecoder().decode(ProjectManifest.self, from: data)
-        guard (1...5).contains(manifest.version), manifest.width > 0, manifest.height > 0,
+        guard (1...6).contains(manifest.version), manifest.width > 0, manifest.height > 0,
               manifest.width <= 8192, manifest.height <= 8192,
               manifest.width * manifest.height <= 32_000_000,
               !manifest.layers.isEmpty, manifest.layers.count <= 32,
               Set(manifest.layers.map(\.id)).count == manifest.layers.count,
               manifest.layers.contains(where: { $0.id == manifest.activeID }) else { throw PaintError.invalidProject }
+        guard manifest.version >= 6 || (manifest.format == nil && manifest.resolution == nil) else { throw PaintError.invalidProject }
+        guard manifest.version < 6 || (manifest.format != nil && manifest.resolution != nil) else { throw PaintError.invalidProject }
+        let format = manifest.format ?? .standard, resolution = manifest.resolution ?? .standard
+        try format.validate(); try resolution.validate()
         var layers: [PaintLayer] = []
         for layer in manifest.layers {
             guard layer.opacity.isFinite, (0...1).contains(layer.opacity) else { throw PaintError.invalidProject }
@@ -156,10 +168,14 @@ enum ProjectCodec {
             let raster: Raster
             if layer.isGroup == true || layer.effect != nil {
                 guard layer.file.isEmpty else { throw PaintError.invalidProject }
-                raster = Raster(width: manifest.width, height: manifest.height)
+                raster = Raster(width: manifest.width, height: manifest.height, format: format)
             } else {
-                guard let png = children[layer.file]?.regularFileContents else { throw PaintError.invalidProject }
-                raster = try decodeImage(png)
+                guard let data = children[layer.file]?.regularFileContents else { throw PaintError.invalidProject }
+                if manifest.version >= 6 {
+                    guard layer.file == "\(layer.id.uuidString).rgba", data.count == manifest.width * manifest.height * format.depth.bytesPerPixel else { throw PaintError.invalidProject }
+                    var pixels = Raster(width: manifest.width, height: manifest.height, format: format)
+                    pixels.bytes = data; pixels.resolution = resolution; raster = pixels
+                } else { raster = try decodeImage(data).converted(to: .standard) }
             }
             guard raster.width == manifest.width, raster.height == manifest.height else { throw PaintError.invalidProject }
             var decoded = PaintLayer(id: layer.id, name: layer.name, raster: raster,
@@ -183,8 +199,10 @@ enum ProjectCodec {
         }
         var state = DocumentState(width: 1, height: 1)
         state.width = manifest.width; state.height = manifest.height
+        state.format = format; state.resolution = resolution
         state.layers = layers; state.activeID = manifest.activeID
         try state.validateLayerTree()
+        try state.format.validate(); try state.resolution.validate()
         return state
     }
 
@@ -195,18 +213,28 @@ enum ProjectCodec {
               let height = props[kCGImagePropertyPixelHeight] as? Int,
               width > 0, height > 0 else { throw PaintError.invalidImage }
         guard width <= 8192, height <= 8192, width * height <= 32_000_000 else { throw PaintError.imageTooLarge }
-        // ImageIO applies EXIF orientation for photographs before they enter the document.
-        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
-                                      kCGImageSourceCreateThumbnailWithTransform: true,
-                                      kCGImageSourceThumbnailMaxPixelSize: max(width, height)]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { throw PaintError.invalidImage }
-        return try Raster(image: image)
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldAllowFloat: true] as CFDictionary) else { throw PaintError.invalidImage }
+        let orientation = (props[kCGImagePropertyOrientation] as? Int) ?? 1
+        let format = RGBFormat(profile: .imported(image.colorSpace), depth: image.bitsPerComponent > 8 ? .sixteen : .eight)
+        let oriented: CGImage
+        if (2...8).contains(orientation) {
+            let graph = CIImage(cgImage: image).oriented(forExifOrientation: Int32(orientation))
+            oriented = ImageRenderer().cgImage(graph, format: format)
+        } else { oriented = image }
+        var raster = try Raster(image: oriented, format: format)
+        let dx = (props[kCGImagePropertyDPIWidth] as? Double) ?? 72
+        let dy = (props[kCGImagePropertyDPIHeight] as? Double) ?? dx
+        let resolution = ImageResolution(x: dx, y: dy)
+        if (try? resolution.validate()) != nil { raster.resolution = orientation >= 5 && orientation <= 8 ? ImageResolution(x: dy, y: dx) : resolution }
+        return raster
     }
 
-    static func imageData(_ image: CGImage, type: String) throws -> Data {
+    static func imageData(_ image: CGImage, type: String, resolution: ImageResolution = .standard) throws -> Data {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, type as CFString, 1, nil) else { throw PaintError.invalidImage }
-        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary)
+        var properties = resolution.properties
+        properties[kCGImageDestinationLossyCompressionQuality] = 0.92
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw PaintError.invalidImage }
         return data as Data
     }
@@ -254,7 +282,7 @@ final class PaintDocument: NSDocument {
 
     var composite: CGImage {
         if let imageCache { return imageCache }
-        let image = renderer.cgImage(compositeImage)
+        let image = renderer.cgImage(compositeImage, format: state.format)
         imageCache = image
         return image
     }
@@ -353,7 +381,8 @@ final class PaintDocument: NSDocument {
 
     func export(to url: URL, settings: ImageExportSettings) throws {
         finishPendingEdits?()
-        let raster = try Raster(image: composite)
+        var raster = try Raster(image: composite, format: state.format)
+        raster.resolution = state.resolution
         let data = try ImageFileIO.encode(raster, settings: settings, iconSource: iconSource, icnsSource: icnsSource)
         try data.write(to: url, options: .atomic)
     }

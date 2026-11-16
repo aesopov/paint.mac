@@ -7,6 +7,7 @@ struct PixelColor: Equatable, Codable {
     var g: UInt8
     var b: UInt8
     var a: UInt8 = 255
+    var extendedRGB: [Double]? = nil
 
     static let black = PixelColor(r: 29, g: 32, b: 39)
     static let white = PixelColor(r: 255, g: 255, b: 255)
@@ -18,24 +19,37 @@ struct PixelColor: Equatable, Codable {
 
     init(_ color: NSColor) {
         let c = color.usingColorSpace(.sRGB) ?? .black
-        r = UInt8((c.redComponent * 255).rounded())
-        g = UInt8((c.greenComponent * 255).rounded())
-        b = UInt8((c.blueComponent * 255).rounded())
-        a = UInt8((c.alphaComponent * 255).rounded())
+        let extended = color.usingColorSpace(.extendedSRGB) ?? c
+        let values = [extended.redComponent, extended.greenComponent, extended.blueComponent]
+        if values.contains(where: { $0 < -0.00001 || $0 > 1.00001 }) { extendedRGB = values.map { Double($0) } }
+        r = UInt8((max(0, min(1, c.redComponent)) * 255).rounded())
+        g = UInt8((max(0, min(1, c.greenComponent)) * 255).rounded())
+        b = UInt8((max(0, min(1, c.blueComponent)) * 255).rounded())
+        a = UInt8((max(0, min(1, c.alphaComponent)) * 255).rounded())
+        let quantized = [Double(r), Double(g), Double(b)].map { $0 / 255 }
+        if zip(values, quantized).contains(where: { abs(Double($0) - $1) > 0.00001 }) { extendedRGB = values.map { Double($0) } }
     }
 
     var nsColor: NSColor {
-        NSColor(srgbRed: Double(r) / 255, green: Double(g) / 255,
-                blue: Double(b) / 255, alpha: Double(a) / 255)
+        if let extendedRGB, extendedRGB.count == 3, extendedRGB.allSatisfy(\.isFinite) {
+            let components = (extendedRGB + [Double(a) / 255]).map { CGFloat($0) }
+            return components.withUnsafeBufferPointer { NSColor(colorSpace: .extendedSRGB, components: $0.baseAddress!, count: 4) }
+        }
+        return NSColor(srgbRed: Double(r) / 255, green: Double(g) / 255,
+                       blue: Double(b) / 255, alpha: Double(a) / 255)
     }
     var hex: String { String(format: "#%02X%02X%02X", r, g, b) }
 }
 
-/// RGBA8, premultiplied sRGB, with the first row at the top of the image.
+/// Premultiplied RGBA8/RGBA16 in the tagged RGB profile; top row first.
 struct Raster: Equatable {
     let width: Int
     let height: Int
     var storage: TileGrid
+    var resolution = ImageResolution.standard
+    var format: RGBFormat { RGBFormat(profile: storage.profile, depth: storage.channels == 8 ? .sixteen : .eight) }
+    var depth: RGBDepth { format.depth }
+    var stride: Int { storage.channels }
     /// Contiguous pixels are an explicit compatibility boundary for codecs,
     /// export, and whole-image operations. Live painting uses bounded regions.
     var bytes: Data {
@@ -44,79 +58,106 @@ struct Raster: Equatable {
     }
     var ciImage: CIImage { storage.ciImage }
     var isTransparent: Bool {
-        if storage.base[3] > 0 && storage.tiles.count < storage.rows * storage.columns { return false }
+        let alphaOffset = depth == .eight ? 3 : 6
+        if storage.base[alphaOffset...] .contains(where: { $0 > 0 }) && storage.tiles.count < storage.rows * storage.columns { return false }
         let side = storage.tileSide
         for (key, tile) in storage.tiles {
             let w = min(side, width - key % storage.columns * side)
             let h = min(side, height - key / storage.columns * side)
             let empty = tile.data.withUnsafeBytes { raw -> Bool in
                 let p = raw.bindMemory(to: UInt8.self)
-                for y in 0..<h { for x in 0..<w where p[(y * side + x) * 4 + 3] > 0 { return false } }
+                for y in 0..<h { for x in 0..<w {
+                    let i = (y * side + x) * stride + alphaOffset
+                    if p[i] > 0 || (depth == .sixteen && p[i + 1] > 0) { return false }
+                } }
                 return true
             }
             if !empty { return false }
         }
         return true
     }
+    static func == (lhs: Raster, rhs: Raster) -> Bool {
+        lhs.width == rhs.width && lhs.height == rhs.height && lhs.storage == rhs.storage
+    }
     static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
 
-    init(width: Int, height: Int, color: PixelColor = .clear) {
+    init(width: Int, height: Int, color: PixelColor = .clear, format: RGBFormat = .standard) {
         self.width = width; self.height = height
-        let a = Int(color.a)
-        storage = TileGrid(width: width, height: height, channels: 4,
-                           base: [UInt8(Int(color.r) * a / 255), UInt8(Int(color.g) * a / 255), UInt8(Int(color.b) * a / 255), color.a])
+        let values = color.components(in: format.profile), alpha = Double(color.a) / 255
+        var base = Data(count: format.depth.bytesPerPixel)
+        base.withUnsafeMutableBytes { raw in
+            let p = RGBSamples(raw: raw, depth: format.depth)
+            for c in 0..<3 { p[c] = values[c] * alpha * p.maximum }; p[3] = alpha * p.maximum
+        }
+        storage = TileGrid(width: width, height: height, channels: format.depth.bytesPerPixel, base: Array(base))
+        storage.profile = format.profile
     }
 
-    init(image: CGImage) throws {
+    init(image: CGImage, format requested: RGBFormat? = nil) throws {
         let width = image.width, height = image.height
         guard width > 0, height > 0, width <= 8192, height <= 8192,
               width * height <= 32_000_000 else { throw PaintError.imageTooLarge }
-        self.width = width; self.height = height
-        storage = TileGrid(width: width, height: height, channels: 4)
-        var pixels = Data(count: width * height * 4)
+        let format = requested ?? RGBFormat(profile: .imported(image.colorSpace), depth: image.bitsPerComponent > 8 ? .sixteen : .eight)
+        try format.validate()
+        self.init(width: width, height: height, format: format)
+        var pixels = Data(count: width * height * format.depth.bytesPerPixel)
         let rendered = pixels.withUnsafeMutableBytes { ptr -> Bool in
             guard let ctx = CGContext(data: ptr.baseAddress, width: width, height: height,
-                                      bitsPerComponent: 8, bytesPerRow: width * 4,
-                                      space: Self.colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                                      bitsPerComponent: format.depth.rawValue, bytesPerRow: width * format.depth.bytesPerPixel,
+                                      space: format.profile.space, bitmapInfo: format.depth.bitmapInfo) else { return false }
+            ctx.setBlendMode(.copy)
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
         guard rendered else { throw PaintError.invalidImage }
-        storage = TileGrid(width: width, height: height, channels: 4, data: pixels)
+        storage = TileGrid(width: width, height: height, channels: format.depth.bytesPerPixel, data: pixels)
+        storage.profile = format.profile
     }
-
+    func converted(to target: RGBFormat) throws -> Raster {
+        guard format != target else { return self }
+        var result = try Raster(image: cgImage, format: target)
+        result.resolution = resolution
+        return result
+    }
     var cgImage: CGImage {
-        let provider = CGDataProvider(data: bytes as CFData)!
-        return CGImage(width: width, height: height, bitsPerComponent: 8,
-                       bitsPerPixel: 32, bytesPerRow: width * 4,
-                       space: Self.colorSpace,
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        CGImage(width: width, height: height, bitsPerComponent: depth.rawValue,
+                bitsPerPixel: depth.rawValue * 4, bytesPerRow: width * stride,
+                space: format.profile.space, bitmapInfo: CGBitmapInfo(rawValue: depth.bitmapInfo),
+                provider: CGDataProvider(data: bytes as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
     }
 
     var bounds: CGRect { CGRect(x: 0, y: 0, width: width, height: height) }
 
     func pixel(x: Int, y: Int) -> PixelColor {
         guard x >= 0, y >= 0, x < width, y < height else { return .clear }
-        let a = Int(storage.value(x: x, y: y, channel: 3))
+        if format == .standard {
+            let a = Int(storage.value(x: x, y: y, channel: 3))
+            guard a > 0 else { return .clear }
+            return PixelColor(r: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 0)) * 255 / a)),
+                              g: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 1)) * 255 / a)),
+                              b: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 2)) * 255 / a)), a: UInt8(a))
+        }
+        func value(_ c: Int) -> Double {
+            let b = depth == .eight ? c : c * 2
+            let low = storage.value(x: x, y: y, channel: b)
+            if depth == .eight { return Double(low) / 255 }
+            return Double(UInt16(low) | UInt16(storage.value(x: x, y: y, channel: b + 1)) << 8) / 65535
+        }
+        let a = value(3)
         guard a > 0 else { return .clear }
-        return PixelColor(r: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 0)) * 255 / a)),
-                          g: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 1)) * 255 / a)),
-                          b: UInt8(min(255, Int(storage.value(x: x, y: y, channel: 2)) * 255 / a)), a: UInt8(a))
+        let components = (0..<3).map { min(1, value($0) / a) } + [a]
+        return PixelColor(NSColor(cgColor: CGColor(colorSpace: format.profile.space, components: components.map { CGFloat($0) })!)!)
     }
 
     mutating func fill(color: PixelColor, rect: CGRect? = nil) {
         let area = (rect ?? bounds).integral.intersection(bounds)
         guard !area.isNull, !area.isEmpty else { return }
-        let a = Int(color.a)
-        let rgba = [UInt8(Int(color.r) * a / 255), UInt8(Int(color.g) * a / 255),
-                    UInt8(Int(color.b) * a / 255), color.a]
-        if area == bounds { storage = TileGrid(width: width, height: height, channels: 4, base: rgba); return }
+        let solid = Raster(width: width, height: height, color: color, format: format).storage
+        if area == bounds { storage = solid; return }
+        let stride = stride, base = solid.base
         storage.edit(in: area) { data, _ in
             data.withUnsafeMutableBytes { raw in
-                let p = raw.bindMemory(to: UInt8.self)
-                for i in stride(from: 0, to: p.count, by: 4) { for c in 0..<4 { p[i + c] = rgba[c] } }
+                for i in 0..<raw.count { raw[i] = base[i % stride] }
             }
         }
     }
@@ -125,17 +166,18 @@ struct Raster: Equatable {
     /// or copying an entire layer. Selection coverage is applied exactly once.
     mutating func editPixels(in area: CGRect, selection: SelectionMask? = nil,
                              _ body: (UnsafeMutableRawBufferPointer, CGRect) -> Void) {
+        let depth = depth
         storage.edit(in: area) { data, region in
             let before = selection == nil ? Data() : data
             data.withUnsafeMutableBytes { body($0, region) }
             if let selection {
                 data.withUnsafeMutableBytes { raw in
                     before.withUnsafeBytes { old in
-                        let p = raw.bindMemory(to: UInt8.self), src = old.bindMemory(to: UInt8.self)
+                        let p = RGBSamples(raw: raw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: old), depth: depth)
                         let rw = Int(region.width)
                         for y in 0..<Int(region.height) { for x in 0..<rw {
                             let a = Int(selection.value(x: x + Int(region.minX), y: y + Int(region.minY))), i = (y * rw + x) * 4
-                            for c in 0..<4 { p[i + c] = UInt8((Int(p[i + c]) * a + Int(src[i + c]) * (255 - a) + 127) / 255) }
+                            for c in 0..<4 { p[i + c] = (p[i + c] * Double(a) + src[i + c] * Double(255 - a)) / 255 }
                         } }
                     }
                 }
@@ -165,9 +207,10 @@ struct Raster: Equatable {
         guard !region.isNull, !region.isEmpty else { return }
         let dx = end.x - start.x, dy = end.y - start.y
         let lengthSquared = dx * dx + dy * dy
+        let depth = depth, colors = color.components(in: format.profile)
         func render() {
             editPixels(in: region) { ptr, region in
-                let p = ptr.bindMemory(to: UInt8.self)
+                let p = RGBSamples(raw: ptr, depth: depth)
                 for y in Int(region.minY)..<Int(region.maxY) {
                     for x in Int(region.minX)..<Int(region.maxX) {
                         let px = Double(x) + 0.5, py = Double(y) + 0.5
@@ -179,12 +222,12 @@ struct Raster: Equatable {
                         guard alpha > 0 else { continue }
                         let i = ((y - Int(region.minY)) * Int(region.width) + x - Int(region.minX)) * 4
                         if erase {
-                            for c in 0..<4 { p[i + c] = UInt8((Double(p[i + c]) * (1 - alpha)).rounded()) }
+                            for c in 0..<4 { p[i + c] = p[i + c] * (1 - alpha) }
                         } else {
-                            for (c, value) in [color.r, color.g, color.b].enumerated() {
-                                p[i + c] = UInt8(min(255, (Double(value) * alpha + Double(p[i + c]) * (1 - alpha)).rounded()))
+                            for (c, value) in colors.enumerated() {
+                                p[i + c] = value * p.maximum * alpha + p[i + c] * (1 - alpha)
                             }
-                            p[i + 3] = UInt8(min(255, (255 * alpha + Double(p[i + 3]) * (1 - alpha)).rounded()))
+                            p[i + 3] = p.maximum * alpha + p[i + 3] * (1 - alpha)
                         }
                     }
                 }
@@ -207,12 +250,13 @@ struct Raster: Equatable {
         let radius = max(1, size) / 2 + 2
         let area = rect.insetBy(dx: -radius, dy: -radius).integral.intersection(clip ?? bounds).intersection(bounds).intersection(selection?.bounds ?? bounds)
         guard !area.isNull, !area.isEmpty else { return }
+        let format = format
         editPixels(in: area, selection: selection) { ptr, region in
             let w = Int(region.width), h = Int(region.height)
             guard let ctx = CGContext(data: ptr.baseAddress, width: w, height: h,
-                                      bitsPerComponent: 8, bytesPerRow: w * 4,
-                                      space: Self.colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+                                      bitsPerComponent: format.depth.rawValue, bytesPerRow: w * format.depth.bytesPerPixel,
+                                      space: format.profile.space,
+                                      bitmapInfo: format.depth.bitmapInfo) else { return }
             ctx.translateBy(x: -region.minX, y: region.maxY)
             ctx.scaleBy(x: 1, y: -1)
             ctx.clip(to: area)
@@ -225,11 +269,9 @@ struct Raster: Equatable {
                 ctx.setAlpha(opacity)
                 ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             }
-            ctx.setStrokeColor(red: Double(color.r) / 255, green: Double(color.g) / 255,
-                               blue: Double(color.b) / 255, alpha: Double(color.a) / 255 * (fillColor == nil ? opacity : 1))
+            ctx.setStrokeColor(color.nsColor.withAlphaComponent(Double(color.a) / 255 * (fillColor == nil ? opacity : 1)).cgColor)
             if let fillColor {
-                ctx.setFillColor(red: Double(fillColor.r) / 255, green: Double(fillColor.g) / 255,
-                                 blue: Double(fillColor.b) / 255, alpha: Double(fillColor.a) / 255)
+                ctx.setFillColor(fillColor.nsColor.cgColor)
             }
             if ellipse { ctx.addEllipse(in: rect) } else { ctx.addRect(rect) }
             if fillColor != nil {
@@ -246,12 +288,19 @@ struct Raster: Equatable {
         let area = (clip ?? bounds).integral.intersection(bounds).intersection(selection?.bounds ?? bounds)
         guard area.contains(CGPoint(x: x, y: y)) else { return }
         let target = pixel(x: x, y: y)
-        if target == color { return }
-        let w = width, h = height
+        if depth == .eight && target == color { return }
+        let w = width, h = height, depth = depth
+        let replacementColor = color.components(in: format.profile)
+        let seed = storage.read(CGRect(x: x, y: y, width: 1, height: 1))
+        let targetSamples = seed.withUnsafeBytes { raw -> [Double] in
+            let p = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: raw), depth: depth)
+            let a = p[3]
+            return (0..<3).map { a == 0 ? 0 : min(1, p[$0] / a) } + [a / p.maximum]
+        }
         var visited = [Bool](repeating: false, count: w * h)
         var stack = [y * w + x]
         bytes.withUnsafeMutableBytes { ptr in
-            let p = ptr.bindMemory(to: UInt8.self)
+            let p = RGBSamples(raw: ptr, depth: depth)
             while let index = stack.popLast() {
                 guard !visited[index] else { continue }
                 visited[index] = true
@@ -259,15 +308,12 @@ struct Raster: Equatable {
                 guard area.contains(CGPoint(x: px, y: py)) else { continue }
                 let coverage = Int(selection?.value(x: px, y: py) ?? 255)
                 guard coverage > 0 else { continue }
-                let a = Int(p[i + 3])
-                let r = a == 0 ? 0 : min(255, Int(p[i]) * 255 / a)
-                let g = a == 0 ? 0 : min(255, Int(p[i + 1]) * 255 / a)
-                let b = a == 0 ? 0 : min(255, Int(p[i + 2]) * 255 / a)
-                guard max(abs(r - Int(target.r)), abs(g - Int(target.g)),
-                          abs(b - Int(target.b)), abs(a - Int(target.a))) <= tolerance else { continue }
-                let replacement = [Int(color.r) * Int(color.a) / 255, Int(color.g) * Int(color.a) / 255,
-                                   Int(color.b) * Int(color.a) / 255, Int(color.a)]
-                for c in 0..<4 { p[i + c] = UInt8((replacement[c] * coverage + Int(p[i + c]) * (255 - coverage) + 127) / 255) }
+                let a = p[i + 3]
+                let current = (0..<3).map { a == 0 ? 0 : min(1, p[i + $0] / a) } + [a / p.maximum]
+                guard zip(current, targetSamples).allSatisfy({ abs($0 - $1) * 255 <= Double(tolerance) + 0.001 }) else { continue }
+                let alpha = Double(color.a) / 255
+                let replacement = replacementColor.map { $0 * alpha * p.maximum } + [alpha * p.maximum]
+                for c in 0..<4 { p[i + c] = (replacement[c] * Double(coverage) + p[i + c] * Double(255 - coverage)) / 255 }
                 // Mark on pop so every connected pixel is visited, with bounded neighbor indices.
                 if px > 0 && !visited[index - 1] { stack.append(index - 1) }
                 if px + 1 < w && !visited[index + 1] { stack.append(index + 1) }
@@ -279,9 +325,10 @@ struct Raster: Equatable {
 
     func cropped(to rect: CGRect) -> Raster {
         let area = rect.integral.intersection(bounds)
-        guard !area.isNull, !area.isEmpty else { return Raster(width: 1, height: 1) }
-        var result = Raster(width: Int(area.width), height: Int(area.height))
-        result.storage = TileGrid(width: result.width, height: result.height, channels: 4, data: storage.read(area))
+        guard !area.isNull, !area.isEmpty else { return Raster(width: 1, height: 1, format: format) }
+        var result = Raster(width: Int(area.width), height: Int(area.height), format: format)
+        result.storage = TileGrid(width: result.width, height: result.height, channels: stride, data: storage.read(area))
+        result.storage.profile = format.profile; result.resolution = resolution
         return result
     }
 
@@ -292,16 +339,16 @@ struct Raster: Equatable {
         guard !area.isNull, !area.isEmpty else { return result }
         let source = bytes
         var destination = result.bytes
-        for y in Int(area.minY)..<Int(area.maxY) {
-            for x in Int(area.minX)..<Int(area.maxX) {
-                let tx = x + dx, ty = y + dy
-                guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
-                let src = (y * width + x) * 4, dst = (ty * width + tx) * 4
-                // Composite moved pixels over content that was outside the selection.
-                let alpha = Double(source[src + 3]) / 255
-                for c in 0..<4 {
-                    destination[dst + c] = UInt8(min(255, (Double(source[src + c]) + Double(destination[dst + c]) * (1 - alpha)).rounded()))
-                }
+        destination.withUnsafeMutableBytes { raw in
+            source.withUnsafeBytes { old in
+                let dst = RGBSamples(raw: raw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: old), depth: depth)
+                for y in Int(area.minY)..<Int(area.maxY) { for x in Int(area.minX)..<Int(area.maxX) {
+                    let tx = x + dx, ty = y + dy
+                    guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
+                    let i = (y * width + x) * 4, j = (ty * width + tx) * 4
+                    let alpha = src[i + 3] / src.maximum
+                    for c in 0..<4 { dst[j + c] = src[i + c] + dst[j + c] * (1 - alpha) }
+                } }
             }
         }
         result.bytes = destination
@@ -317,11 +364,11 @@ struct Raster: Equatable {
         result.bytes.withUnsafeMutableBytes { dstRaw in
             edited.bytes.withUnsafeBytes { srcRaw in
                 selection.coverage.withUnsafeBytes { maskRaw in
-                    let dst = dstRaw.bindMemory(to: UInt8.self), src = srcRaw.bindMemory(to: UInt8.self)
+                    let dst = RGBSamples(raw: dstRaw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: srcRaw), depth: depth)
                     let mask = maskRaw.bindMemory(to: UInt8.self)
                     for i in 0..<mask.count where mask[i] > 0 {
                         let a = Int(mask[i])
-                        for c in 0..<4 { dst[i * 4 + c] = UInt8((Int(src[i * 4 + c]) * a + Int(dst[i * 4 + c]) * (255 - a) + 127) / 255) }
+                        for c in 0..<4 { dst[i * 4 + c] = (src[i * 4 + c] * Double(a) + dst[i * 4 + c] * Double(255 - a)) / 255 }
                     }
                 }
             }
@@ -334,10 +381,10 @@ struct Raster: Equatable {
         var result = self
         result.bytes.withUnsafeMutableBytes { raw in
             selection.coverage.withUnsafeBytes { maskRaw in
-                let p = raw.bindMemory(to: UInt8.self), mask = maskRaw.bindMemory(to: UInt8.self)
+                let p = RGBSamples(raw: raw, depth: depth), mask = maskRaw.bindMemory(to: UInt8.self)
                 for i in 0..<mask.count {
                     let a = Int(mask[i])
-                    for c in 0..<4 { p[i * 4 + c] = UInt8((Int(p[i * 4 + c]) * a + 127) / 255) }
+                    for c in 0..<4 { p[i * 4 + c] = p[i * 4 + c] * Double(a) / 255 }
                 }
             }
         }
@@ -359,13 +406,13 @@ struct Raster: Equatable {
         let area = selection.bounds
         result.bytes.withUnsafeMutableBytes { dstRaw in
             source.bytes.withUnsafeBytes { srcRaw in
-                let dst = dstRaw.bindMemory(to: UInt8.self), src = srcRaw.bindMemory(to: UInt8.self)
+                let dst = RGBSamples(raw: dstRaw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: srcRaw), depth: depth)
                 for y in Int(area.minY)..<Int(area.maxY) {
                     for x in Int(area.minX)..<Int(area.maxX) {
                         let tx = x + dx, ty = y + dy
                         guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
-                        let i = (y * width + x) * 4, j = (ty * width + tx) * 4, a = Int(src[i + 3])
-                        for c in 0..<4 { dst[j + c] = UInt8(min(255, Int(src[i + c]) + (Int(dst[j + c]) * (255 - a) + 127) / 255)) }
+                        let i = (y * width + x) * 4, j = (ty * width + tx) * 4, a = src[i + 3] / src.maximum
+                        for c in 0..<4 { dst[j + c] = src[i + c] + dst[j + c] * (1 - a) }
                     }
                 }
             }
@@ -374,16 +421,17 @@ struct Raster: Equatable {
     }
 
     func resizedCanvas(width newWidth: Int, height newHeight: Int, offsetX: Int, offsetY: Int) -> Raster {
-        var result = Raster(width: newWidth, height: newHeight)
+        var result = Raster(width: newWidth, height: newHeight, format: format)
+        result.resolution = resolution
         let x0 = max(0, -offsetX), x1 = min(width, newWidth - offsetX)
         let y0 = max(0, -offsetY), y1 = min(height, newHeight - offsetY)
         guard x0 < x1, y0 < y1 else { return result }
         let source = bytes
         var destination = result.bytes
         for y in y0..<y1 {
-            let sourceOffset = (y * width + x0) * 4
-            let target = ((y + offsetY) * newWidth + x0 + offsetX) * 4
-            let count = (x1 - x0) * 4
+            let sourceOffset = (y * width + x0) * stride
+            let target = ((y + offsetY) * newWidth + x0 + offsetX) * stride
+            let count = (x1 - x0) * stride
             destination.replaceSubrange(target..<target + count, with: source[sourceOffset..<sourceOffset + count])
         }
         result.bytes = destination
@@ -391,12 +439,13 @@ struct Raster: Equatable {
     }
 
     func scaled(width newWidth: Int, height newHeight: Int, smooth: Bool) throws -> Raster {
-        var result = Raster(width: newWidth, height: newHeight)
-        let image = cgImage
+        var result = Raster(width: newWidth, height: newHeight, format: format)
+        result.resolution = resolution
+        let image = cgImage, format = format
         let success = result.bytes.withUnsafeMutableBytes { raw -> Bool in
             guard let ctx = CGContext(data: raw.baseAddress, width: newWidth, height: newHeight,
-                                      bitsPerComponent: 8, bytesPerRow: newWidth * 4, space: Self.colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                                      bitsPerComponent: format.depth.rawValue, bytesPerRow: newWidth * format.depth.bytesPerPixel, space: format.profile.space,
+                                      bitmapInfo: format.depth.bitmapInfo) else { return false }
             ctx.interpolationQuality = smooth ? .high : .none
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
             return true
@@ -414,12 +463,13 @@ struct Raster: Equatable {
     mutating func drawText(_ text: String, in box: CGRect, font: NSFont, color: PixelColor,
                            opacity: Double, antialias: Bool, selection: SelectionMask?, horizontalScale: Double = 1) {
         guard !text.isEmpty, box.width > 0, box.height > 0 else { return }
+        let format = format
         let layout = TextRasterLayout(text: text, font: font, color: color, width: box.width / horizontalScale)
         editPixels(in: box.integral.intersection(bounds).intersection(selection?.bounds ?? bounds), selection: selection) { raw, region in
             let w = Int(region.width), h = Int(region.height)
-            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
-                                      bytesPerRow: w * 4, space: Self.colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: format.depth.rawValue,
+                                      bytesPerRow: w * format.depth.bytesPerPixel, space: format.profile.space,
+                                      bitmapInfo: format.depth.bitmapInfo) else { return }
             ctx.setAllowsAntialiasing(antialias); ctx.setShouldAntialias(antialias)
             ctx.setAllowsFontSmoothing(false); ctx.setShouldSmoothFonts(false)
             ctx.translateBy(x: -region.minX, y: region.maxY); ctx.scaleBy(x: 1, y: -1)
@@ -438,9 +488,10 @@ struct Raster: Equatable {
 }
 
 enum PaintError: LocalizedError {
-    case invalidImage, invalidProject, imageTooLarge, tooManyLayers
+    case invalidImage, invalidProject, imageTooLarge, tooManyLayers, invalidResolution
     var errorDescription: String? {
         switch self {
+        case .invalidResolution: return "Resolution must be between 1 and 100,000 pixels per inch."
         case .invalidImage: return "This image could not be opened."
         case .invalidProject: return "This Paint.MAC project is damaged or uses an unsupported format."
         case .imageTooLarge: return "Use an image up to 8,192 pixels per side and 32 million pixels in total."
@@ -454,8 +505,8 @@ final class ImageRenderer {
     let context: CIContext
     init() {
         device = MTLCreateSystemDefaultDevice()
-        if let device { context = CIContext(mtlDevice: device, options: [.workingColorSpace: Raster.colorSpace]) }
-        else { context = CIContext(options: [.workingColorSpace: Raster.colorSpace]) }
+        if let device { context = CIContext(mtlDevice: device, options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedSRGB)!, .workingFormat: CIFormat.RGBAf]) }
+        else { context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.extendedSRGB)!, .workingFormat: CIFormat.RGBAf]) }
     }
 
     private func opacity(_ image: CIImage, _ value: Double) -> CIImage {
@@ -533,7 +584,7 @@ final class ImageRenderer {
     func contentImage(of id: UUID, layers: [PaintLayer], width: Int, height: Int) -> CGImage {
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         let image = LayerImages(renderer: self, layers: layers, bounds: bounds).content(id)
-        return context.createCGImage(image, from: bounds, format: .RGBA8, colorSpace: Raster.colorSpace)!
+        return cgImage(image, format: layers.first?.raster.format ?? .standard)
     }
     /// Keep the compositing graph on the GPU path until an export or CPU pixel
     /// operation explicitly needs a CGImage. The canvas renders this graph directly.
@@ -543,10 +594,10 @@ final class ImageRenderer {
         if whiteBackground { image = image.composited(over: CIImage(color: .white).cropped(to: bounds)) }
         return image
     }
-    func cgImage(_ image: CIImage) -> CGImage {
-        context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: Raster.colorSpace)!
+    func cgImage(_ image: CIImage, format: RGBFormat = .standard) -> CGImage {
+        context.createCGImage(image, from: image.extent, format: format.depth.ciFormat, colorSpace: format.profile.space)!
     }
     func composite(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false) -> CGImage {
-        cgImage(compositeImage(layers, width: width, height: height, whiteBackground: whiteBackground))
+        cgImage(compositeImage(layers, width: width, height: height, whiteBackground: whiteBackground), format: layers.first?.raster.format ?? .standard)
     }
 }

@@ -181,6 +181,7 @@ enum ICNSCodec {
     }
 
     private static func makeElements(_ raster: Raster, slot: ICNSSlot) throws -> [ICNSFile.Element] {
+        let raster = try raster.converted(to: .standard)
         guard slot.canReplace, ICNSSlot.readable.contains(slot), raster.width == slot.pixels, raster.height == slot.pixels else { throw ICNSError.invalidSlot }
         if slot.type == "ic04" || slot.type == "ic05" || slot.maskType != nil {
             var channels = [[UInt8]](repeating: [], count: 4)

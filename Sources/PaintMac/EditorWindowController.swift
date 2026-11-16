@@ -62,6 +62,18 @@ private final class SwatchButton: NSButton {
     override func menu(for event: NSEvent) -> NSMenu? { nil }
 }
 
+private final class LayerMenuInvocation {
+    let action: Selector
+    let value: Any?
+    let activeID: UUID
+    let selectedIDs: Set<UUID>
+    let editingMask: Bool
+    init(action: Selector, value: Any?, state: DocumentState, selectedIDs: Set<UUID>) {
+        self.action = action; self.value = value; activeID = state.activeID
+        self.selectedIDs = selectedIDs; editingMask = state.isEditingMask
+    }
+}
+
 final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     let paintDocument: PaintDocument
     let canvas: CanvasView
@@ -331,6 +343,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         layerTable.registerForDraggedTypes([LayerTableView.pasteboardType])
         layerTable.setDraggingSourceOperationMask(.move, forLocal: true)
         layerTable.onDelete = { [weak self] in self?.removeLayer() }
+        layerTable.contextMenuProvider = { [weak self] row in self?.layerContextMenu(forRow: row) }
         layerTrash.sourceTable = layerTable
         layerTrash.canDelete = { [weak self] ids in self?.paintDocument.state.canRemoveLayers(ids) == true }
         layerTrash.deleteLayers = { [weak self] ids in self?.paintDocument.removeLayers(ids) }
@@ -498,7 +511,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             let size = selection.isEmpty ? "empty" : "\(Int(selection.bounds.width)) × \(Int(selection.bounds.height))"
             dimensions.stringValue = "Selection \(size) · \(state.width) × \(state.height) px"
         }
-        else { dimensions.stringValue = "\(state.width) × \(state.height) px" }
+        else { dimensions.stringValue = "\(state.width) × \(state.height) px · \(state.format.profile.name) · \(state.format.depth.rawValue)-bit" }
+        dimensions.toolTip = String(format: "%.6g × %.6g PPI · %.3f × %.3f inches", state.resolution.x, state.resolution.y, Double(state.width) / state.resolution.x, Double(state.height) / state.resolution.y)
     }
     private func refreshZoom() { zoomButton.title = "\(Int((canvas.zoom * 100).rounded()))% ▾" }
 
@@ -585,7 +599,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             var preview = baseline
             if let id, let index = preview.layers.firstIndex(where: { $0.id == id }) { preview.layers[index].effect = settings }
             else {
-                var layer = PaintLayer(name: settings.kind.title, raster: Raster(width: preview.width, height: preview.height))
+                var layer = PaintLayer(name: settings.kind.title, raster: Raster(width: preview.width, height: preview.height, format: preview.format))
                 layer.effect = settings; layer.mask = preview.selection; preview.insertLayer(layer)
             }
             self.canvas.effectPreviewImage = self.paintDocument.renderer.compositeImage(preview.layers, width: preview.width, height: preview.height)
@@ -771,6 +785,113 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         window?.makeFirstResponder(canvas)
     }
 
+    /// Right-click selects an unselected row, preserving a multi-selection
+    /// when the clicked row is already included. Menu inspection never edits.
+    func layerContextMenu(forRow row: Int) -> NSMenu? {
+        guard displayedLayerIDs.indices.contains(row) else { return nil }
+        let id = displayedLayerIDs[row]
+        var selected = selectedLayerIDs
+        if !selected.contains(id) { selected = [id] }
+        if paintDocument.state.activeID != id {
+            canvas.finishText()
+            paintDocument.state.activeID = id
+        }
+        refresh(selectedIDs: selected)
+        window?.makeFirstResponder(layerTable)
+        return makeLayerContextMenu()
+    }
+    private func makeLayerContextMenu() -> NSMenu {
+        let state = paintDocument.state, selected = selectedLayerIDs, layer = state.activeLayer
+        let single = selected.count == 1
+        let menu = NSMenu(title: single ? layer.name : "Selected Layers"); menu.autoenablesItems = false
+        func bind(_ item: NSMenuItem) {
+            guard let action = item.action else { return }
+            item.representedObject = LayerMenuInvocation(action: action, value: item.representedObject, state: state, selectedIDs: selected)
+            item.target = self; item.action = #selector(performLayerMenuAction(_:))
+        }
+        func command(_ title: String, _ action: Selector, enabled: Bool = true, value: String? = nil) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.isEnabled = enabled; item.representedObject = value; bind(item); menu.addItem(item)
+        }
+        if single {
+            command("Rename…", #selector(renameLayer))
+            command(layer.isGroup ? "Duplicate Group" : "Duplicate Layer", #selector(duplicateLayer), enabled: state.layers.count + state.subtreeIDs(layer.id).count <= 32)
+            command(layer.visible ? "Hide Layer" : "Show Layer", #selector(contextVisibility))
+            command(layer.isLocked ? "Unlock Layer" : "Lock Layer", #selector(toggleLayerLock), enabled: !state.ancestors(of: layer.id).contains(where: state.isEffectivelyLocked))
+            if layer.text != nil || layer.effect != nil {
+                menu.addItem(.separator())
+                command(layer.text != nil ? "Edit Text…" : "Edit Effect…", #selector(editLayerContent), enabled: !state.isEffectivelyLocked(layer.id))
+                if layer.text != nil { command("Rasterize Text Layer", #selector(rasterizeTextLayer), enabled: !state.isEffectivelyLocked(layer.id)) }
+            }
+            menu.addItem(.separator())
+            if layer.isGroup {
+                command(layer.expanded ? "Collapse Group" : "Expand Group", #selector(contextDisclosure))
+                command("Ungroup", #selector(ungroup), enabled: state.canUngroupActive)
+                command("Merge Group", #selector(mergeGroup), enabled: state.canModifySubtree(layer.id))
+            } else {
+                command(layer.effect != nil ? "Merge Below" : "Merge Down", #selector(mergeDown), enabled: state.canMergeDown)
+            }
+        }
+        command(single ? "Group Layer" : "Group Selected Layers", #selector(groupSelected), enabled: (try? state.groupingLayers(selected)) != nil)
+        let move = NSMenuItem(title: "Move to Group", action: nil, keyEquivalent: "")
+        let destinations = NSMenu(); destinations.autoenablesItems = false
+        func destination(_ title: String, parent: UUID?) {
+            let item = NSMenuItem(title: title, action: #selector(contextMoveToGroup(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = parent?.uuidString
+            let candidate = try? state.relocatingLayers(selected, into: parent, before: nil)
+            item.isEnabled = candidate != nil && candidate != state && state.layers.contains { selected.contains($0.id) && $0.parentID != parent }
+            bind(item); destinations.addItem(item)
+        }
+        destination("Top Level", parent: nil)
+        let excluded = state.expandedMovingIDs(selected)
+        for group in state.layers.reversed() where group.isGroup && !excluded.contains(group.id) {
+            let path = (state.ancestors(of: group.id).reversed().compactMap { id in state.layers.first { $0.id == id }?.name } + [group.name]).joined(separator: " / ")
+            destination(path, parent: group.id)
+        }
+        move.submenu = destinations; move.isEnabled = destinations.items.contains { $0.isEnabled }; menu.addItem(move)
+        if single {
+            command("Move Up", #selector(layerUp), enabled: state.canReorderActive(by: 1))
+            command("Move Down", #selector(layerDown), enabled: state.canReorderActive(by: -1))
+            menu.addItem(.separator())
+            command(layer.isClipped ? "Release Clipping Mask" : "Create Clipping Mask", #selector(toggleClipping), enabled: state.canClipActive)
+            let mask = NSMenuItem(title: "Layer Mask", action: nil, keyEquivalent: "")
+            mask.submenu = LayerMaskCommand.menu(target: self, action: #selector(maskCommand(_:)), state: state)
+            mask.submenu?.autoenablesItems = false
+            mask.submenu?.items.forEach(bind)
+            menu.addItem(mask)
+            if layer.mask != nil {
+                command(state.isEditingMask ? "Edit Layer Image" : "Edit Layer Mask", #selector(contextEditingTarget))
+            }
+        }
+        menu.addItem(.separator())
+        command(single ? (layer.isGroup ? "Delete Group" : "Delete Layer") : "Delete Selected Layers", #selector(removeLayer), enabled: state.canRemoveLayers(selected))
+        return menu
+    }
+    @objc private func performLayerMenuAction(_ sender: NSMenuItem) {
+        guard let invocation = sender.representedObject as? LayerMenuInvocation else { return }
+        canvas.finishText()
+        guard paintDocument.state.layers.contains(where: { $0.id == invocation.activeID }) else { return }
+        paintDocument.state.activeID = invocation.activeID
+        paintDocument.state.editingMask = invocation.editingMask && paintDocument.state.activeLayer.mask != nil
+        refresh(selectedIDs: invocation.selectedIDs)
+        let command = NSMenuItem(title: sender.title, action: invocation.action, keyEquivalent: "")
+        command.representedObject = invocation.value
+        NSApp.sendAction(invocation.action, to: self, from: command)
+    }
+    @objc private func contextVisibility() {
+        paintDocument.edit("Layer Visibility") { $0.layers[$0.activeIndex].visible.toggle() }
+    }
+    @objc private func contextDisclosure() {
+        guard paintDocument.state.activeLayer.isGroup else { return }
+        canvas.finishText()
+        paintDocument.state.layers[paintDocument.state.activeIndex].expanded.toggle()
+        refresh()
+    }
+    @objc private func contextEditingTarget() {
+        selectLayerTarget(paintDocument.state.activeID, mask: !paintDocument.state.isEditingMask)
+    }
+    @objc private func contextMoveToGroup(_ sender: NSMenuItem) { moveToGroup(sender) }
+
     func numberOfRows(in tableView: NSTableView) -> Int { displayedLayerIDs.count }
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { LayerRowView() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -927,7 +1048,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     @objc func addLayer() {
         guard paintDocument.state.layers.count < 32 else { showError(PaintError.tooManyLayers); return }
         paintDocument.edit("Add Layer") { state in
-            state.insertLayer(PaintLayer(name: "Layer \(state.layers.count)", raster: Raster(width: state.width, height: state.height)))
+            state.insertLayer(PaintLayer(name: "Layer \(state.layers.count)", raster: Raster(width: state.width, height: state.height, format: state.format)))
         }
     }
     @objc func duplicateLayer() { do { try paintDocument.duplicateActiveNode() } catch { showError(error) } }
@@ -1014,6 +1135,18 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         }
         canvas.selection = nil; canvas.zoomToFit()
     }
+    func showImageProperties() {
+        canvas.finishText()
+        let dialog = ImagePropertiesDialog(state: paintDocument.state)
+        dialog.onApply = { [weak self] format, resolution, size, smooth in
+            guard let self else { return }
+            do {
+                try self.paintDocument.applyColorSettings(format, resolution: resolution, pixelSize: size, smooth: smooth)
+                if size != nil { self.canvas.zoomToFit() }
+            } catch { self.showError(error) }
+        }
+        dialog.show(for: window!)
+    }
     func resizeImage() { showSizeDialog(mode: .scale) }
     func resizeCanvas() { showSizeDialog(mode: .resize) }
     private func showSizeDialog(mode: CanvasSizeMode) {
@@ -1032,8 +1165,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.finishText()
         guard paintDocument.state.activeEffectivelyVisible, paintDocument.state.canPaintTarget else { return }
         let original = paintDocument.state.editingRaster
-        let image = CIImage(cgImage: original.cgImage).applyingFilter(filter)
-        guard let output = paintDocument.renderer.context.createCGImage(image, from: image.extent), let raster = try? Raster(image: output) else { return }
+        let image = original.ciImage.applyingFilter(filter)
+        let output = paintDocument.renderer.cgImage(image, format: original.format)
+        guard let raster = try? Raster(image: output, format: original.format) else { return }
         paintDocument.edit(name) { state in
             state.editingRaster = original.blending(raster, selection: state.selection)
         }
@@ -1062,16 +1196,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     }
     func importLayer(_ raster: Raster, name: String) throws {
         guard paintDocument.state.layers.count < 32 else { throw PaintError.tooManyLayers }
-        var placed = Raster(width: paintDocument.state.width, height: paintDocument.state.height)
-        let dx = max(0, (placed.width - raster.width) / 2), dy = max(0, (placed.height - raster.height) / 2)
-        let sourceBytes = raster.bytes
-        var placedBytes = placed.bytes
-        for y in 0..<min(raster.height, placed.height) {
-            let length = min(raster.width, placed.width) * 4
-            let start = ((y + dy) * placed.width + dx) * 4
-            placedBytes.replaceSubrange(start..<start + length, with: sourceBytes[y * raster.width * 4..<y * raster.width * 4 + length])
-        }
-        placed.bytes = placedBytes
+        let raster = try raster.converted(to: paintDocument.state.format)
+        let dx = max(0, (paintDocument.state.width - raster.width) / 2), dy = max(0, (paintDocument.state.height - raster.height) / 2)
+        let placed = raster.resizedCanvas(width: paintDocument.state.width, height: paintDocument.state.height, offsetX: dx, offsetY: dy)
         paintDocument.edit("Import Layer") { state in
             let layer = PaintLayer(name: name, raster: placed)
             state.insertLayer(layer)

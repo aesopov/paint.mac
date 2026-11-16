@@ -148,31 +148,8 @@ extension DocumentState {
 extension PaintDocument {
     func createGroup(wrapping ids: Set<UUID> = []) throws {
         finishPendingEdits?()
-        guard state.layers.count < 32 else { throw PaintError.tooManyLayers }
-        var next = state
-        let selected = ids.isEmpty ? [] : next.layers.filter { ids.contains($0.id) && !next.ancestors(of: $0.id).contains(where: ids.contains) }
-        var roots: [UUID] = [], parent = next.activeLayer.isGroup ? next.activeID : next.activeLayer.parentID
-        if !selected.isEmpty {
-            parent = selected[0].parentID
-            guard selected.allSatisfy({ $0.parentID == parent }) else { throw LayerTreeError(message: "Select layers from the same group to group them together.") }
-            let units = next.clippingUnits(parent: parent)
-            let chosen = units.enumerated().filter { _, unit in unit.contains(where: ids.contains) }
-            let positions = chosen.map(\.offset)
-            guard positions.last! - positions.first! + 1 == positions.count else { throw LayerTreeError(message: "Select adjacent layers to group them together.") }
-            roots = chosen.flatMap(\.element)
-        }
-        var group = PaintLayer(name: "Group", raster: Raster(width: state.width, height: state.height))
-        group.isGroup = true; group.parentID = parent
-        let insertion: Int
-        if let last = roots.last { insertion = next.layers.firstIndex { $0.id == last }! + 1 }
-        else { insertion = next.activeLayer.isGroup ? next.activeIndex : next.layers.firstIndex { $0.id == next.activeClippingUnit.last! }! + 1 }
-        next.layers.insert(group, at: insertion)
-        for index in next.layers.indices where roots.contains(next.layers[index].id) { next.layers[index].parentID = group.id }
-        next.activeID = group.id; next.canonicalizeLayers()
-        guard next.layers.allSatisfy({ next.ancestors(of: $0.id).count + ($0.isGroup ? 1 : 0) <= DocumentState.maximumGroupDepth }) else { throw LayerTreeError(message: "Groups can be nested up to 8 levels.") }
-        try next.validateLayerTree()
-        guard state.permitsLockedLayerChanges(to: next) else { throw LayerTreeError(message: "Unlock the affected layers first.") }
-        let previous = state; state = next; commit(previous, name: roots.isEmpty ? "New Group" : "Group Layers")
+        let next = try state.groupingLayers(ids)
+        let previous = state; state = next; commit(previous, name: ids.isEmpty ? "New Group" : "Group Layers")
     }
     func ungroupActive() {
         finishPendingEdits?()
@@ -285,5 +262,38 @@ extension PaintDocument {
             state.layers[index].mask = nil; state.layers[index].maskEnabled = true
             state.activeID = keptID; state.editingMask = false
         }
+    }
+}
+
+extension DocumentState {
+    /// Shared planning for group creation and menu availability. No history or
+    /// document state is changed while inspecting a context menu.
+    func groupingLayers(_ ids: Set<UUID>) throws -> DocumentState {
+        let state = self
+        guard state.layers.count < 32 else { throw PaintError.tooManyLayers }
+        var next = state
+        let selected = ids.isEmpty ? [] : next.layers.filter { ids.contains($0.id) && !next.ancestors(of: $0.id).contains(where: ids.contains) }
+        var roots: [UUID] = [], parent = next.activeLayer.isGroup ? next.activeID : next.activeLayer.parentID
+        if !selected.isEmpty {
+            parent = selected[0].parentID
+            guard selected.allSatisfy({ $0.parentID == parent }) else { throw LayerTreeError(message: "Select layers from the same group to group them together.") }
+            let units = next.clippingUnits(parent: parent)
+            let chosen = units.enumerated().filter { _, unit in unit.contains(where: ids.contains) }
+            let positions = chosen.map(\.offset)
+            guard positions.last! - positions.first! + 1 == positions.count else { throw LayerTreeError(message: "Select adjacent layers to group them together.") }
+            roots = chosen.flatMap(\.element)
+        }
+        var group = PaintLayer(name: "Group", raster: Raster(width: state.width, height: state.height, format: state.format))
+        group.isGroup = true; group.parentID = parent
+        let insertion: Int
+        if let last = roots.last { insertion = next.layers.firstIndex { $0.id == last }! + 1 }
+        else { insertion = next.activeLayer.isGroup ? next.activeIndex : next.layers.firstIndex { $0.id == next.activeClippingUnit.last! }! + 1 }
+        next.layers.insert(group, at: insertion)
+        for index in next.layers.indices where roots.contains(next.layers[index].id) { next.layers[index].parentID = group.id }
+        next.activeID = group.id; next.canonicalizeLayers()
+        guard next.layers.allSatisfy({ next.ancestors(of: $0.id).count + ($0.isGroup ? 1 : 0) <= DocumentState.maximumGroupDepth }) else { throw LayerTreeError(message: "Groups can be nested up to 8 levels.") }
+        try next.validateLayerTree()
+        guard state.permitsLockedLayerChanges(to: next) else { throw LayerTreeError(message: "Unlock the affected layers first.") }
+        return next
     }
 }

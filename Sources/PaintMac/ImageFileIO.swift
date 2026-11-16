@@ -4,10 +4,10 @@ import UniformTypeIdentifiers
 /// Built-in format boundary, kept separate from tools and project serialization.
 /// Future codecs can be added here without exposing document internals.
 enum ImageExportFormat: Int, CaseIterable {
-    case png, jpeg, ico, icns
-    var title: String { ["PNG · transparency", "JPEG · white background", "Windows icon (.ico)", "macOS icon (.icns)"][rawValue] }
-    var fileExtension: String { ["png", "jpg", "ico", "icns"][rawValue] }
-    var contentType: UTType { [.png, .jpeg, UTType(filenameExtension: "ico")!, .icns][rawValue] }
+    case png, jpeg, ico, icns, tiff
+    var title: String { ["PNG · transparency", "JPEG · white background", "Windows icon (.ico)", "macOS icon (.icns)", "TIFF · high precision"][rawValue] }
+    var fileExtension: String { ["png", "jpg", "ico", "icns", "tiff"][rawValue] }
+    var contentType: UTType { [.png, .jpeg, UTType(filenameExtension: "ico")!, .icns, .tiff][rawValue] }
 }
 
 enum IconExportMode: Int { case currentSize, windowsSizes, preserveOtherImages, macSizes }
@@ -33,13 +33,14 @@ enum ImageFileIO {
     }
     static func encode(_ raster: Raster, settings: ImageExportSettings, iconSource: IconSource?, icnsSource: ICNSSource? = nil) throws -> Data {
         switch settings.format {
-        case .png: return try ProjectCodec.imageData(raster.cgImage, type: UTType.png.identifier)
+        case .png, .tiff: return try ProjectCodec.imageData(raster.cgImage, type: settings.format.contentType.identifier, resolution: raster.resolution)
         case .jpeg:
             // JPEG has no alpha. Composite on white before passing it to ImageIO.
             let renderer = ImageRenderer()
-            let image = renderer.composite([PaintLayer(name: "Export", raster: raster)], width: raster.width, height: raster.height, whiteBackground: true)
-            return try ProjectCodec.imageData(image, type: UTType.jpeg.identifier)
+            let image = renderer.composite([PaintLayer(name: "Export", raster: try raster.converted(to: .standard))], width: raster.width, height: raster.height, whiteBackground: true)
+            return try ProjectCodec.imageData(image, type: UTType.jpeg.identifier, resolution: raster.resolution)
         case .ico:
+            let raster = try raster.converted(to: .standard)
             switch settings.iconMode {
             case .currentSize: return try ICOCodec.encode([raster])
             case .windowsSizes: return try ICOCodec.sizeSet(from: raster, smooth: settings.smooth)
@@ -49,6 +50,7 @@ enum ImageFileIO {
                 return try ICOCodec.replacing(iconSource, with: raster)
             }
         case .icns:
+            let raster = try raster.converted(to: .standard)
             switch settings.iconMode {
             case .currentSize:
                 guard let slot = settings.icnsSlot ?? ICNSSlot.choices(width: raster.width, height: raster.height).first(where: { $0.scale == 1 }) ?? ICNSSlot.choices(width: raster.width, height: raster.height).first else { throw ICNSError.invalidSlot }
@@ -191,8 +193,8 @@ final class ImageExportOptions: NSObject, NSOpenSavePanelDelegate {
         scaling.isHidden = s.iconMode != .windowsSizes && s.iconMode != .macSizes
         slotPopup.isHidden = s.format != .icns || s.iconMode != .currentSize
         switch s.format {
-        case .png: note.stringValue = "Exports the visible image with transparency."
-        case .jpeg: note.stringValue = "Exports the visible image on a white background."
+        case .png, .tiff: note.stringValue = "Preserves the document RGB profile, 8/16-bit precision, resolution, and transparency."
+        case .jpeg: note.stringValue = "Converts to 8-bit sRGB on a white background; preserves resolution."
         case .ico:
             switch s.iconMode {
             case .currentSize, .preserveOtherImages:

@@ -40,9 +40,9 @@ final class MetalCanvasRenderer {
         queue.label = "Paint.MAC canvas"
     }
 
-    func encode(_ image: CIImage, to texture: MTLTexture, commandBuffer: MTLCommandBuffer) throws -> CIRenderTask {
+    func encode(_ image: CIImage, to texture: MTLTexture, commandBuffer: MTLCommandBuffer, colorSpace: CGColorSpace = Raster.colorSpace) throws -> CIRenderTask {
         let destination = CIRenderDestination(mtlTexture: texture, commandBuffer: commandBuffer)
-        destination.colorSpace = Raster.colorSpace
+        destination.colorSpace = colorSpace
         destination.alphaMode = .premultiplied
         // Metal row zero is the top of the presented texture.
         destination.isFlipped = true
@@ -66,8 +66,8 @@ final class MetalCanvasView: MTKView, MTKViewDelegate {
     init(renderer: MetalCanvasRenderer) {
         canvasRenderer = renderer
         super.init(frame: .zero, device: renderer.device)
-        colorPixelFormat = .bgra8Unorm
-        colorspace = Raster.colorSpace
+        colorPixelFormat = .rgba16Float
+        colorspace = RGBProfile.displayP3.space
         framebufferOnly = false // Core Image writes to the drawable texture.
         clearColor = MTLClearColorMake(0, 0, 0, 0)
         layer?.isOpaque = false
@@ -106,7 +106,7 @@ final class MetalCanvasView: MTKView, MTKViewDelegate {
         }
         let image = imageProvider(CGSize(width: drawable.texture.width, height: drawable.texture.height))
         do {
-            let task = try canvasRenderer.encode(image, to: drawable.texture, commandBuffer: buffer)
+            let task = try canvasRenderer.encode(image, to: drawable.texture, commandBuffer: buffer, colorSpace: RGBProfile.displayP3.space)
             let semaphore = inFlight
             buffer.addCompletedHandler { [weak self, image, task] completed in
                 // Keep immutable pixels and the Core Image task alive until the GPU

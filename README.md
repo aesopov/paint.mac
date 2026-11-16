@@ -2,7 +2,19 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.14.0 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.15.1 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+
+Right-click a layer row for rename, duplicate, visibility, lock, grouping/reordering, merge, clipping, and mask actions. Text/effect layers expose their edit actions; groups expose collapse/expand and ungroup. Actions respect locks, clipping stacks, group rules, and layer limits. Right-clicking an unselected row selects it; right-clicking a selected row preserves the multi-selection and offers bulk grouping/movement/deletion. Shift-F10 or the accessibility Show Menu action opens the selected row’s menu.
+
+## Color and resolution
+
+Use **Image → Color & Resolution…** to convert between sRGB, Display P3, and Adobe RGB (1998), choose 8 or 16 bits per channel, and set horizontal/vertical resolution in pixels per inch (PPI). Embedded RGB ICC profiles are preserved on import and remain available in the dialog. Converting to a narrower gamut can clip colors; reducing to 8 bits discards precision. Undo restores the previous format and pixels.
+
+Print dimensions can be entered in inches or centimeters. With **Resample pixels** off, changing PPI/print size leaves pixel dimensions and artwork untouched. With it on, print dimensions and PPI determine new pixel dimensions; layers, masks, text geometry, and selections scale together. Existing Image & Canvas Size controls still handle pixel/percentage dimensions and canvas edges. New and legacy documents default to 72 PPI.
+
+PNG and TIFF exports preserve 8/16-bit RGB, the color profile, transparency, and resolution. JPEG exports convert to 8-bit sRGB on white and preserve resolution. ICO/ICNS exports convert to 8-bit sRGB. Imports above 8 bits use 16-bit editing. CMYK/grayscale inputs are converted to RGB; native CMYK editing, print soft proofing, and HDR/32-bit float documents are not supported yet. Hex color fields use sRGB; the native picker and eyedropper can retain wide-gamut RGB colors.
+
+Projects with nondefault color settings or resolution use **version 6**: `document.json` stores the RGB ICC profile, channel precision, and PPI, and each image/text layer uses an exact raw premultiplied `.rgba` payload (top-left rows, RGBA channel order, 16-bit samples little-endian). Masks stay L8. This avoids PNG alpha round-trip rounding in the editable project. Projects using default 8-bit sRGB at 72 PPI keep the previous minimum v1–v5 version. Old app builds cannot open v6 projects. Undo cache tile payloads preserve the full precision; session history is still excluded from projects.
 
 ## Build and run
 
@@ -205,9 +217,10 @@ Existing version 1, 2, 3, and 4 projects remain readable. Projects save as versi
 ## Code layout
 
 - `BrushProfile.swift`: shared hardness falloff, per-gesture soft brush coverage, and bounded grayscale masks for soft shape outlines.
-- `Raster.swift`: premultiplied RGBA8 pixels, brush rasterization, fill, crop, movement, and the Core Image compositor.
+- `Raster.swift`: premultiplied RGBA8/RGBA16 pixels, brush rasterization, fill, crop, movement, and the Core Image compositor.
 - `SelectionMask.swift`: immutable 8-bit coverage masks, shape creation, boolean combinations, contours, translation, inversion, and feathering. Further selection operations can be added without changing individual painting tools.
 - `PaintDocument.swift`: document state, undo transactions, ImageIO, layered package encoding, and NSDocument integration.
+- `ColorManagement.swift` / `ImagePropertiesDialog.swift`: tagged RGB profiles, integer precision, PPI/print-size planning, document conversion, and native controls.
 - `PixelTiles.swift`: sparse immutable tile versions, bounded pixel access, mask conversion, and Core Image sources.
 - `HistoryCache.swift`: compressed disk-backed tile history, integrity checks, session ownership, and cache budgets.
 - `ICOCodec.swift`: bounded ICO container parsing, legacy DIB/PNG decoding, 32-bit export, size sets, and representation replacement.
@@ -230,7 +243,7 @@ Existing version 1, 2, 3, and 4 projects remain readable. Projects save as versi
 - `App.swift`: launch, document creation/import, menus, and command validation.
 - `Tests/PaintMacTests`: raster behavior, orientation/transparency, compositing, project validation, saving/export, window ownership, and undo/redo.
 
-Pixel coordinates start at the top left. Layers are stored from bottom to top. Layers and masks use sparse, immutable 256 × 256 pixel tiles (smaller for small images). A gesture copies only changed tiles and registers one undo snapshot containing tile IDs and document metadata. Core Image uses Metal when available and falls back to its default renderer. The canvas renders the compositing graph directly into a Metal drawable in premultiplied sRGB, sized to the viewport's backing pixels. Redraw requests are coalesced onto the AppKit run loop, including mouse tracking, and explicitly submit a frame after edits, zoom, pan, resize, and backing-scale changes. Up to three frames can be in flight; completion schedules any pending redraw without blocking input. Cursor and selection overlays and inline text controls remain native AppKit views. Export, sampling, snapshots, and the automatic non-Metal fallback use Core Graphics.
+Pixel coordinates start at the top left. Layers are stored from bottom to top. Layers and masks use sparse, immutable 256 × 256 pixel tiles (smaller for small images). A gesture copies only changed tiles and registers one undo snapshot containing tile IDs and document metadata. Core Image uses Metal when available and falls back to its default renderer. The canvas renders the compositing graph directly into a Metal drawable in premultiplied Display P3 half-float output, sized to the viewport's backing pixels. Redraw requests are coalesced onto the AppKit run loop, including mouse tracking, and explicitly submit a frame after edits, zoom, pan, resize, and backing-scale changes. Up to three frames can be in flight; completion schedules any pending redraw without blocking input. Cursor and selection overlays and inline text controls remain native AppKit views. Export, sampling, snapshots, and the automatic non-Metal fallback use Core Graphics.
 
 ## Current limits and next steps
 
@@ -238,6 +251,6 @@ Pixel storage and undo history are tiled. Empty layers, group/effect placeholder
 
 Only Normal layer blending is implemented. Layer styles (shadow/outline/glow), magic wand, gradients, transform handles, pressure-sensitive brushes, plugins, and Paint.NET `.pdn` compatibility are future work. Rectangles and ellipses use native paths for fast drawing even at large thicknesses, with uniform opacity across filled shapes. Native project saves preserve pixels and layers; undo history and the current selection are session state.
 
-Undo uses a private, per-document session cache under `~/Library/Application Support/Paint.MAC/UndoCache-v1`. Unchanged tile versions are shared; older pixels are compressed with LZFSE and verified with SHA-256. Disk writes run on a utility queue; a tile stays in RAM until its file has been written and verified. The history cache targets 128 MiB of resident pixels and a 2 GiB allocated disk footprint; in-flight writes can temporarily exceed the RAM target. Completed oldest undo groups are pruned when the disk budget is exceeded. Metadata is capped separately at approximately 16 MiB, with a maximum of 500 recorded actions. History can exceed the previous 40-step limit. Cold undo may wait for disk reads; loading validates all required tiles before replacing the current state. If disk caching is unavailable, history falls back to its RAM budget. Cache sessions are removed on document close; exclusive session locks protect other running instances during abandoned-session cleanup. Undo is session-only and is not saved in projects. Existing v1–v5 projects and image formats remain compatible.
+Undo uses a private, per-document session cache under `~/Library/Application Support/Paint.MAC/UndoCache-v1`. Unchanged tile versions are shared; older pixels are compressed with LZFSE and verified with SHA-256. Disk writes run on a utility queue; a tile stays in RAM until its file has been written and verified. The history cache targets 128 MiB of resident pixels and a 2 GiB allocated disk footprint; in-flight writes can temporarily exceed the RAM target. Completed oldest undo groups are pruned when the disk budget is exceeded. Metadata is capped separately at approximately 16 MiB, with a maximum of 500 recorded actions. History can exceed the previous 40-step limit. Cold undo may wait for disk reads; loading validates all required tiles before replacing the current state. If disk caching is unavailable, history falls back to its RAM budget. Cache sessions are removed on document close; exclusive session locks protect other running instances during abandoned-session cleanup. Undo is session-only and is not saved in projects. Existing v1–v5 projects remain readable; v6 preserves nondefault color/resolution settings.
 
 The next engineering priority is moving expensive pixel edits and cold-history loading off the main thread. The next editing priorities are magic wand selections and transform handles.

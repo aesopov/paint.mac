@@ -99,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         let image = menu("Image")
         add(image, "Image & Canvas Size…", #selector(resizeImage), "r", modifiers: [.command, .option])
         add(image, "Resize Canvas…", #selector(resizeCanvas))
+        add(image, "Color & Resolution…", #selector(imageProperties))
         add(image, "Crop to Selection", #selector(cropImage), "k", modifiers: [.command, .shift])
         image.addItem(.separator())
         add(image, "Invert Colors", #selector(invertImage), "i", modifiers: [.command, .shift])
@@ -204,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
                 let layer = PaintLayer(name: url.deletingPathExtension().lastPathComponent, raster: raster)
                 var state = DocumentState(width: 1, height: 1)
                 state.width = raster.width; state.height = raster.height
+                state.format = raster.format; state.resolution = raster.resolution
                 state.layers = [layer]; state.activeID = layer.id
                 let doc = createDocument(state: state)
                 doc.iconSource = iconSource; doc.icnsSource = icnsSource
@@ -294,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     }
     @objc func cropImage() { editor?.cropToSelection() }
     @objc func resizeImage() { editor?.resizeImage() }
+    @objc func imageProperties() { editor?.showImageProperties() }
     @objc func resizeCanvas() { editor?.resizeCanvas() }
     @objc func chooseTool(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let tool = PaintTool(rawValue: raw) { editor?.selectTool(tool) }
@@ -333,7 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func zoomFit() { editor?.canvas.zoomToFit() }
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.14.0",
+            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.15.1",
             .credits: NSAttributedString(string: "A small, native home for your pixels.\nBuilt with Swift, AppKit, and Metal-backed Core Image.\nAn independent editor inspired by the Paint.NET workflow.")
         ])
     }
