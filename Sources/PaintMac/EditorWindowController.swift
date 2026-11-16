@@ -118,6 +118,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let selectionModePopup = NSPopUpButton()
     private let featherButton = NSButton(title: "Feather…", target: nil, action: nil)
     private let edgeMode = NSSegmentedControl(labels: ["Smooth", "Sharp"], trackingMode: .selectOne, target: nil, action: nil)
+    private let pixelAlignment = NSButton(checkboxWithTitle: "Align to Pixels", target: nil, action: nil)
     private let shapeAlignmentPopup = NSPopUpButton()
     private var shapeAlignmentOptions: NSStackView!
     private var toolOptionsScroll: ToolOptionsScrollView!
@@ -270,6 +271,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         edgeMode.selectedSegment = 0; edgeMode.target = self; edgeMode.action = #selector(edgeModeChanged)
         edgeMode.setAccessibilityLabel("Painting edge mode")
         edgeMode.toolTip = "Smooth enables antialiasing. Sharp disables antialiasing."
+        pixelAlignment.target = self; pixelAlignment.action = #selector(pixelAlignmentChanged)
+        pixelAlignment.setAccessibilityLabel("Align geometry to pixels")
+        pixelAlignment.toolTip = "Snap rectangle/ellipse bounds outward (floor left/top, ceil right/bottom) and outline width to image pixels while Smooth keeps curves antialiased. Centered odd-width outlines use pixel centers. Sharp always snaps."
         shapeStylePopup.addItems(withTitles: ShapePaintMode.allCases.map(\.rawValue))
         shapeStylePopup.target = self; shapeStylePopup.action = #selector(shapeStyleChanged)
         shapeStylePopup.setAccessibilityLabel("Shape paint style")
@@ -302,7 +306,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         shapeAlignmentPopup.setAccessibilityLabel("Shape outline alignment")
         shapeAlignmentPopup.toolTip = "Inside: dragged boundary is the outer edge. Center: boundary is the stroke center. Outside: boundary is the inner edge."
         shapeAlignmentOptions = stack([label("Outline", size: 11, color: .secondaryLabelColor), shapeAlignmentPopup], vertical: false, spacing: 6)
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, pixelAlignment, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
         toolOptionsScroll = ToolOptionsScrollView(options: optionStack)
         toolOptionsScroll.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(toolOptionsScroll)
         toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
@@ -612,13 +616,21 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     @objc private func toolClicked(_ sender: NSButton) { selectTool(PaintTool.allCases[sender.tag]) }
     @objc private func edgeModeChanged() {
         canvas.smooth = edgeMode.selectedSegment == 0
+        updateShapeControls()
         canvas.focusText()
+    }
+    @objc private func pixelAlignmentChanged() {
+        canvas.alignGeometryToPixels = pixelAlignment.state == .on
+        window?.makeFirstResponder(canvas)
     }
     @objc private func shapeAlignmentChanged() {
         canvas.shapeAlignment = ShapeOutlineAlignment.allCases[shapeAlignmentPopup.indexOfSelectedItem]
         window?.makeFirstResponder(canvas)
     }
     private func updateShapeControls() {
+        pixelAlignment.isHidden = !canvas.tool.isGeometry && canvas.tool != .selection && canvas.tool != .ellipseSelect
+        pixelAlignment.isEnabled = canvas.smooth
+        pixelAlignment.state = !canvas.smooth || canvas.alignGeometryToPixels ? .on : .off
         let isShape = canvas.tool == .rectangle || canvas.tool == .ellipse
         shapeStylePopup.isHidden = !isShape
         shapeStylePopup.selectItem(withTitle: canvas.shapePaintMode.rawValue)

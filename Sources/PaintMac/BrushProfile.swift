@@ -148,6 +148,7 @@ extension Raster {
                                   corners: RectangleCorners = .square, border: ShapeBorder = .solid, sourcePath: CGPath? = nil) {
         let radius = max(0.5, size / 2) * alignment.strokeMultiplier
         let profile = BrushProfile(radius: radius, hardness: hardness, antialias: antialias)
+        let sharpThinEllipse = ellipse && !antialias && max(1, size) == 1 && profile.hardness == 1
         let expansion = alignment.expansion(for: size) + 1
         let region = rect.insetBy(dx: -expansion, dy: -expansion).integral.intersection(bounds)
             .intersection(clip ?? bounds).intersection(selection?.bounds ?? bounds).integral.intersection(bounds)
@@ -161,7 +162,7 @@ extension Raster {
                 guard let ctx = CGContext(data: raw.baseAddress, width: rw, height: rh, bitsPerComponent: 8, bytesPerRow: rw,
                                           space: SelectionMask.colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
                 ctx.translateBy(x: -region.minX, y: region.maxY); ctx.scaleBy(x: 1, y: -1)
-                ctx.clip(to: clip ?? bounds); ctx.setShouldAntialias(antialias)
+                ctx.clip(to: clip ?? bounds); ctx.setShouldAntialias(antialias || sharpThinEllipse)
                 ctx.setBlendMode(.copy); ctx.setLineJoin(.round)
                 if fill { ctx.setFillColor(gray: 1, alpha: 1); ctx.addPath(path); ctx.fillPath() }
                 else {
@@ -180,6 +181,15 @@ extension Raster {
                     }
                 }
                 return true
+            }
+            if succeeded && sharpThinEllipse {
+                // Quartz's aliased curve filling conservatively widens the
+                // doubled Inside/Outside stroke. Harden area coverage instead
+                // so a 1 px ellipse retains a 1 px edge without partial alpha.
+                data.withUnsafeMutableBytes { raw in
+                    let pixels = raw.bindMemory(to: UInt8.self)
+                    for i in pixels.indices { pixels[i] = pixels[i] >= 128 ? 255 : 0 }
+                }
             }
             return succeeded ? data : nil
         }

@@ -95,6 +95,16 @@ final class CanvasView: NSView, NSEditor {
     var shapeAlignment: ShapeOutlineAlignment = .center
     var rectangleCorners = RectangleCorners.square { didSet { onShapePaintModeChange?() } }
     var shapeBorder = ShapeBorder.solid { didSet { onShapePaintModeChange?() } }
+    private var alignedShapes = false
+    private var alignedSelections = true
+    /// Shapes retain free placement by default; marquees retain pixel bounds.
+    var alignGeometryToPixels: Bool {
+        get { tool.isSelection ? alignedSelections : alignedShapes }
+        set {
+            if tool.isSelection { alignedSelections = newValue } else { alignedShapes = newValue }
+            onShapePaintModeChange?()
+        }
+    }
     var color = PixelColor(r: 64, g: 117, b: 245)
     var alternateColor = PixelColor.white
     var tolerance = 32
@@ -166,6 +176,8 @@ final class CanvasView: NSView, NSEditor {
     private var gestureDrawsOutline = true
     private var gestureCorners = RectangleCorners.square
     private var gestureBorder = ShapeBorder.solid
+    private var gesturePixelAligned = false
+    private var gestureShapeSize: Double = 18
     private var spaceDown = false
     private var pointer: CGPoint?
     private var tracking: NSTrackingArea?
@@ -418,6 +430,8 @@ final class CanvasView: NSView, NSEditor {
         gestureColor = alternate ? alternateColor : color
         gestureDrawsOutline = shapePaintMode.drawsOutline
         gestureCorners = rectangleCorners; gestureBorder = shapeBorder
+        gesturePixelAligned = smooth && alignGeometryToPixels && (tool.isGeometry || tool == .selection || tool == .ellipseSelect)
+        gestureShapeSize = gesturePixelAligned ? max(1, brushSize.rounded()) : brushSize
         switch shapePaintMode {
         case .outline: gestureFillColor = nil
         case .outlineAndFill: gestureFillColor = alternate ? color : alternateColor
@@ -536,6 +550,12 @@ final class CanvasView: NSView, NSEditor {
         var point = point
         paintDocument.state.editingRaster = gestureRaster ?? before.editingRaster
         if tool == .line {
+            if gesturePixelAligned {
+                let endpoints = DragGeometry.pixelAlignedLine(from: gestureStart, to: point, width: gestureShapeSize,
+                                                              constrained: modifiers.contains(.shift), fromCenter: modifiers.contains(.option))
+                paint(from: endpoints.0, to: endpoints.1)
+                return
+            }
             if modifiers.contains(.shift) {
                 let angle = (atan2(point.y - gestureStart.y, point.x - gestureStart.x) / (.pi / 4)).rounded() * (.pi / 4)
                 let length = hypot(point.x - gestureStart.x, point.y - gestureStart.y)
@@ -554,7 +574,7 @@ final class CanvasView: NSView, NSEditor {
             let rect = dragRect(to: point, square: modifiers.contains(.shift), fromCenter: modifiers.contains(.option))
             let selection = self.selection
             paintDocument.state.editRaster { $0.strokeShape(
-                in: rect, ellipse: tool == .ellipse, size: brushSize,
+                in: rect, ellipse: tool == .ellipse, size: gesturePixelAligned ? gestureShapeSize : brushSize,
                 color: gestureColor, opacity: brushOpacity, clip: nil, selection: selection,
                 antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness, alignment: shapeAlignment,
                 drawOutline: gestureDrawsOutline, corners: gestureCorners, border: gestureBorder) }
@@ -617,7 +637,7 @@ final class CanvasView: NSView, NSEditor {
                 softBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
                                        opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth, hardness: gestureHardness)
             } else if tool == .line {
-                raster.strokeLine(from: a, to: b, size: brushSize, color: gestureColor, opacity: brushOpacity,
+                raster.strokeLine(from: a, to: b, size: gesturePixelAligned ? gestureShapeSize : brushSize, color: gestureColor, opacity: brushOpacity,
                                   selection: selection, antialias: smooth, hardness: gestureHardness, border: gestureBorder)
             } else {
                 raster.stroke(from: a, to: b, size: brushSize, color: gestureColor, opacity: brushOpacity,
@@ -653,8 +673,9 @@ final class CanvasView: NSView, NSEditor {
     private func updateSelection(to point: CGPoint, modifiers: NSEvent.ModifierFlags) {
         let state = paintDocument.state
         let incoming: SelectionMask
-        let rect = dragRect(to: point, square: modifiers.contains(.control),
-                            fromCenter: modifiers.contains(.option) && !selectionOptionStartsCombine).integral
+        let geometry = dragRect(to: point, square: modifiers.contains(.control),
+                                fromCenter: modifiers.contains(.option) && !selectionOptionStartsCombine)
+        let rect = !smooth && !gesturePixelAligned ? geometry.integral : geometry
         switch tool {
         case .selection: incoming = .rectangle(rect, width: state.width, height: state.height, corners: gestureCorners, antialias: smooth)
         case .ellipseSelect: incoming = .ellipse(rect, width: state.width, height: state.height, antialias: smooth)
@@ -671,8 +692,13 @@ final class CanvasView: NSView, NSEditor {
         }
     }
     private func dragRect(to point: CGPoint, square: Bool, fromCenter: Bool = false) -> CGRect {
-        DragGeometry.rect(from: gestureStart, to: point, square: square,
-                          snap: !smooth || tool.isSelection || tool == .text,
+        if gesturePixelAligned && (tool.isGeometry || tool == .selection || tool == .ellipseSelect) {
+            let centeredOutline = !tool.isSelection && gestureDrawsOutline && shapeAlignment == .center
+            let phase: CGFloat = centeredOutline && Int(gestureShapeSize) % 2 == 1 ? 0.5 : 0
+            return DragGeometry.pixelAlignedRect(from: gestureStart, to: point, square: square, phase: phase, fromCenter: fromCenter)
+        }
+        return DragGeometry.rect(from: gestureStart, to: point, square: square,
+                          snap: !smooth || tool == .text,
                           centerOnPixel: !smooth && !tool.isSelection && tool != .text && (tool == .line || shapePaintMode.drawsOutline) && shapeAlignment == .center && Int(brushSize.rounded()) % 2 == 1,
                           fromCenter: fromCenter)
     }
@@ -884,6 +910,51 @@ final class CanvasView: NSView, NSEditor {
 /// Snap the anchor and a shared side length before rasterization, so equal
 /// geometric lengths cannot round to different pixel widths and heights.
 enum DragGeometry {
+    private static func stableGridCoordinate(_ value: CGFloat) -> CGFloat {
+        // View/image conversion at fractional zoom can add a few floating-point
+        // ulps to an exact grid edge. Do not expand it by a whole pixel.
+        let integer = value.rounded()
+        return abs(value - integer) <= 1e-9 ? integer : value
+    }
+    static func pixelAlignedPoint(_ point: CGPoint, phase: CGFloat = 0) -> CGPoint {
+        // Odd-width centered strokes sit at pixel centers; fills, selections,
+        // and even-width strokes sit on pixel boundaries.
+        func snap(_ value: CGFloat) -> CGFloat { phase == 0 ? value.rounded() : floor(stableGridCoordinate(value)) + phase }
+        return CGPoint(x: snap(point.x), y: snap(point.y))
+    }
+    static func pixelAlignedRect(from start: CGPoint, to end: CGPoint, square: Bool, phase: CGFloat = 0, fromCenter: Bool = false) -> CGRect {
+        let bounds = rect(from: start, to: end, square: square, snap: false, fromCenter: fromCenter)
+        func lower(_ value: CGFloat) -> CGFloat { floor(stableGridCoordinate(value - phase)) + phase }
+        func upper(_ value: CGFloat) -> CGFloat { ceil(stableGridCoordinate(value - phase)) + phase }
+        if fromCenter {
+            // Keep a grid-aligned center and expand equally in both directions
+            // far enough to contain the original bounds, including off-image drags.
+            let center = pixelAlignedPoint(start, phase: phase)
+            var dx = ceil(stableGridCoordinate(max(center.x - bounds.minX, bounds.maxX - center.x)))
+            var dy = ceil(stableGridCoordinate(max(center.y - bounds.minY, bounds.maxY - center.y)))
+            if square { dx = max(dx, dy); dy = dx }
+            return CGRect(x: center.x - dx, y: center.y - dy, width: 2 * dx, height: 2 * dy)
+        }
+        let left = lower(bounds.minX), top = lower(bounds.minY)
+        let right = upper(bounds.maxX), bottom = upper(bounds.maxY)
+        let a = CGPoint(x: end.x < start.x ? right : left, y: end.y < start.y ? bottom : top)
+        let b = CGPoint(x: end.x < start.x ? left : right, y: end.y < start.y ? top : bottom)
+        return rect(from: a, to: b, square: square, snap: false)
+    }
+    static func pixelAlignedLine(from start: CGPoint, to end: CGPoint, width: Double,
+                                 constrained: Bool, fromCenter: Bool) -> (CGPoint, CGPoint) {
+        let phase: CGFloat = Int(width) % 2 == 1 ? 0.5 : 0
+        let a = pixelAlignedPoint(start, phase: phase)
+        var b = pixelAlignedPoint(end, phase: phase)
+        if constrained {
+            let angle = (atan2(b.y - a.y, b.x - a.x) / (.pi / 4)).rounded() * (.pi / 4)
+            let length = hypot(b.x - a.x, b.y - a.y)
+            let diagonal = abs(cos(angle)) > 0.5 && abs(sin(angle)) > 0.5
+            let step = (diagonal ? length / sqrt(2) : length).rounded()
+            b = CGPoint(x: a.x + cos(angle).rounded() * step, y: a.y + sin(angle).rounded() * step)
+        }
+        return (fromCenter ? CGPoint(x: 2 * a.x - b.x, y: 2 * a.y - b.y) : a, b)
+    }
     static func rect(from start: CGPoint, to end: CGPoint, square: Bool, snap: Bool, centerOnPixel: Bool = false, fromCenter: Bool = false) -> CGRect {
         var origin = start
         var dx = end.x - start.x, dy = end.y - start.y

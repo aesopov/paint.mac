@@ -249,7 +249,9 @@ struct Raster: Equatable {
             fillShape(in: rect, ellipse: ellipse, color: fillColor, opacity: opacity, clip: clip, selection: selection, antialias: antialias, corners: corners)
             return
         }
-        if BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness < 1 || (fillColor != nil && alignment == .inside) {
+        let hard = BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness
+        let sharpThinEllipse = ellipse && !antialias && max(1, size) == 1 && hard == 1
+        if hard < 1 || (fillColor != nil && alignment == .inside) || sharpThinEllipse {
             strokeMaskedShape(in: rect, ellipse: ellipse, size: size, color: color, opacity: opacity, clip: clip,
                             selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness, alignment: alignment, corners: corners, border: border)
             return
