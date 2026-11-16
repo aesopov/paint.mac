@@ -21,6 +21,14 @@ final class SelectionAnimationTests: XCTestCase {
         window.isReleasedWhenClosed = false; window.contentView = canvas
         window.orderFrontRegardless(); canvas.layoutSubtreeIfNeeded(); canvas.setZoom(1)
         run(for: 0.2)
+        // Earlier editor tests can still have queued window/Metal callbacks.
+        // Reassert ordering while AppKit drains them instead of assuming the
+        // first asynchronous WindowServer occlusion update has arrived.
+        let visibleDeadline = Date(timeIntervalSinceNow: 1.5)
+        while !window.occlusionState.contains(.visible) && Date() < visibleDeadline {
+            window.orderFrontRegardless()
+            run(for: 0.05)
+        }
         XCTAssertTrue(window.occlusionState.contains(.visible), "The test window must be onscreen")
         return (doc, canvas, try XCTUnwrap(canvas.subviews.compactMap { $0 as? CanvasOverlayView }.first), window)
     }

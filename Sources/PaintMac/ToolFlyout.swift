@@ -1,9 +1,17 @@
 import AppKit
 
 enum ToolGroup: CaseIterable {
-    case shapes, selections
-    var title: String { self == .shapes ? "Shapes" : "Selections" }
-    var tools: [PaintTool] { self == .shapes ? [.rectangle, .ellipse, .line] : [.selection, .ellipseSelect, .lasso] }
+    case shapes, selections, retouch
+    var title: String {
+        switch self { case .shapes: return "Shapes"; case .selections: return "Selections"; case .retouch: return "Retouch" }
+    }
+    var tools: [PaintTool] {
+        switch self {
+        case .shapes: return [.rectangle, .ellipse, .line]
+        case .selections: return [.selection, .ellipseSelect, .lasso]
+        case .retouch: return [.blur, .sharpen, .smudge]
+        }
+    }
 }
 
 class ToolButton: NSButton {

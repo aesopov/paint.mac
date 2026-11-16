@@ -2,14 +2,19 @@ import AppKit
 import CoreImage
 
 enum PaintTool: String, CaseIterable {
-    case brush, eraser, selection, ellipseSelect, lasso, move, fill, eyedropper, line, rectangle, ellipse, text, crop, hand
+    case brush, eraser, selection, ellipseSelect, lasso, move, fill, eyedropper, line, rectangle, ellipse, text, crop, hand, blur, sharpen, smudge
     var isSelection: Bool { self == .selection || self == .ellipseSelect || self == .lasso }
     var isGeometry: Bool { self == .line || self == .rectangle || self == .ellipse }
+    var isRetouch: Bool { self == .blur || self == .sharpen || self == .smudge }
+    var isBrush: Bool { self == .brush || self == .eraser || isRetouch }
     var isPainting: Bool { [.brush, .eraser, .fill, .line, .rectangle, .ellipse, .text].contains(self) }
     var title: String {
         switch self {
         case .brush: return "Brush"
         case .eraser: return "Eraser"
+        case .blur: return "Blur"
+        case .sharpen: return "Sharpen"
+        case .smudge: return "Smudge"
         case .selection: return "Rectangle Select"
         case .ellipseSelect: return "Ellipse Select"
         case .lasso: return "Lasso Select"
@@ -28,6 +33,9 @@ enum PaintTool: String, CaseIterable {
         switch self {
         case .brush: return "paintbrush.pointed"
         case .eraser: return "eraser"
+        case .blur: return "drop.halffull"
+        case .sharpen: return "triangle"
+        case .smudge: return "hand.draw"
         case .selection: return "rectangle.dashed"
         case .ellipseSelect: return "circle.dashed"
         case .lasso: return "lasso"
@@ -46,6 +54,9 @@ enum PaintTool: String, CaseIterable {
         switch self {
         case .brush: return "b"
         case .eraser: return "e"
+        case .blur: return "u"
+        case .sharpen: return "k"
+        case .smudge: return "n"
         case .selection: return "s"
         case .ellipseSelect: return "m"
         case .lasso: return "a"
@@ -64,6 +75,9 @@ enum PaintTool: String, CaseIterable {
         switch self {
         case .brush: return "Drag to paint. [ and ] change brush size."
         case .eraser: return "Drag to erase pixels on the selected layer."
+        case .blur: return "Drag to soften detail in the selected image or mask. Strength controls buildup. [ and ] change size."
+        case .sharpen: return "Drag to sharpen local detail in the selected image or mask. Strength controls buildup."
+        case .smudge: return "Drag to pull existing pixels along the brush path. Strength controls the pull; a click leaves pixels unchanged."
         case .selection, .ellipseSelect: return "Drag to select. Hold Option during drag for center origin; Control constrains. Before drag: ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
         case .lasso: return "Drag to select. ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
         case .move: return "Drag to move selected pixels, or the entire active layer."
@@ -82,6 +96,7 @@ final class CanvasView: NSView, NSEditor {
     let paintDocument: PaintDocument
     var tool: PaintTool = .brush { willSet { if newValue != tool { finishText() } } didSet { window?.invalidateCursorRects(for: self); overlays.needsDisplay = true } }
     var brushSize: Double = 18
+    var retouchStrength: Double = 0.5
     var brushHardness: Double = 1
     var brushOpacity: Double = 1 { didSet { updateTextAppearance() } }
     var smooth = true { didSet { updateTextAppearance() } }
@@ -166,6 +181,7 @@ final class CanvasView: NSView, NSEditor {
     private var isPanning = false
     private var gestureActive = false
     private var softBrushStroke: SoftBrushStroke?
+    private var retouchStroke: RetouchStroke?
     private var gestureHardness: Double = 1
     private var gestureRaster: Raster?
     private var gestureCreatedLayerID: UUID?
@@ -378,7 +394,7 @@ final class CanvasView: NSView, NSEditor {
             let box = CGRect(origin: toView(textBoxPreview.origin), size: CGSize(width: textBoxPreview.width * zoom, height: textBoxPreview.height * zoom))
             NSColor.controlAccentColor.setStroke(); let path = NSBezierPath(rect: box); path.lineWidth = 1; path.stroke()
         }
-        if let pointer, (tool == .brush || tool == .eraser), !spaceDown, bounds.contains(pointer) {
+        if let pointer, tool.isBrush, !spaceDown, bounds.contains(pointer) {
             let diameter = max(3, brushSize * zoom)
             let circle = NSBezierPath(ovalIn: CGRect(x: pointer.x - diameter / 2, y: pointer.y - diameter / 2,
                                                     width: diameter, height: diameter))
@@ -489,16 +505,22 @@ final class CanvasView: NSView, NSEditor {
             onStatus?("Painting on a new layer inside \(before.activeLayer.name).")
         }
         guard paintDocument.state.canPaintTarget || tool == .move || tool == .text else {
-            gestureActive = false; onStatus?(before.activeLayer.isGroup ? "Groups have no pixels to erase. Select an image layer or the group mask." : "Choose an image layer or mask to paint. Text layers can be rasterized from the Layer menu."); return
+            gestureActive = false
+            onStatus?(tool.isRetouch ? "Retouch needs existing pixels. Select an image layer or a layer/group mask; rasterize text from the Layer menu first." : before.activeLayer.isGroup ? "Groups have no pixels to erase. Select an image layer or the group mask." : "Choose an image layer or mask to paint. Text layers can be rasterized from the Layer menu.")
+            return
         }
         if tool == .text { textUsesAlternate = alternate; return }
         gestureState = before
         gestureRaster = paintDocument.state.editingRaster
         gestureHardness = BrushProfile(radius: 1, hardness: brushHardness, antialias: smooth).hardness
         if gestureHardness < 1, tool == .brush || tool == .eraser { softBrushStroke = SoftBrushStroke(original: paintDocument.state.editingRaster) }
+        if tool.isRetouch {
+            let kind: RetouchStroke.Kind = tool == .blur ? .blur : tool == .sharpen ? .sharpen : .smudge
+            retouchStroke = RetouchStroke(kind: kind, size: brushSize, hardness: gestureHardness, strength: retouchStrength, antialias: smooth)
+        }
         if gestureCreatedLayerID != nil { paintDocument.invalidate() }
         switch tool {
-        case .brush, .eraser: paint(from: point, to: point)
+        case .brush, .eraser, .blur, .sharpen, .smudge: paint(from: point, to: point)
         case .fill:
             let selection = self.selection
             paintDocument.state.editRaster { $0.floodFill(at: point, color: gestureColor, tolerance: tolerance, clip: nil, selection: selection) }
@@ -532,7 +554,7 @@ final class CanvasView: NSView, NSEditor {
         }
         guard let before = gestureState else { return }
         switch tool {
-        case .brush, .eraser:
+        case .brush, .eraser, .blur, .sharpen, .smudge:
             paint(from: lastPoint, to: point); lastPoint = point
         case .move:
             let dx = Int((point.x - gestureStart.x).rounded()), dy = Int((point.y - gestureStart.y).rounded())
@@ -633,7 +655,9 @@ final class CanvasView: NSView, NSEditor {
     private func paint(from a: CGPoint, to b: CGPoint, invalidate: Bool = true) {
         let selection = self.selection
         paintDocument.state.editRaster { raster in
-            if softBrushStroke != nil, tool == .brush || tool == .eraser {
+            if tool.isRetouch, retouchStroke != nil {
+                retouchStroke!.paint(on: &raster, to: b, selection: selection)
+            } else if softBrushStroke != nil, tool == .brush || tool == .eraser {
                 softBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
                                        opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth, hardness: gestureHardness)
             } else if tool == .line {
@@ -654,11 +678,11 @@ final class CanvasView: NSView, NSEditor {
                 paintDocument.state = before; paintDocument.invalidate()
             } else { paintDocument.commit(before, name: tool.title) }
         }
-        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
     }
     private func cancelGesture() {
         let before = gestureState
-        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
         gestureSelection = nil; gestureActive = false
         lassoPoints = []; textBoxPreview = nil; gestureTravel = 0
         if isPanning {

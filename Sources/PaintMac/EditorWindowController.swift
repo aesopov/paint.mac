@@ -84,6 +84,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let hardnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
     private let hardnessValue = label("100%", size: 11, color: .secondaryLabelColor)
     private var hardnessOptions: NSStackView!
+    private let strengthSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let strengthValue = label("50%", size: 11, color: .secondaryLabelColor)
+    private var strengthOptions: NSStackView!
     private let sizeValue = label("18 px", size: 11, color: .secondaryLabelColor)
     private let sizeSlider = NSSlider(value: 18, minValue: 1, maxValue: 300, target: nil, action: nil)
     private let opacitySlider = NSSlider(value: 100, minValue: 1, maxValue: 100, target: nil, action: nil)
@@ -202,7 +205,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         ])
 
         var tools: [NSView] = []
-        let railTools: [PaintTool] = [.brush, .eraser, .selection, .move, .fill, .eyedropper, .rectangle, .text, .crop, .hand]
+        let railTools: [PaintTool] = [.brush, .eraser, .blur, .selection, .move, .fill, .eyedropper, .rectangle, .text, .crop, .hand]
         for tool in railTools {
             let button: ToolButton
             if let group = ToolGroup.allCases.first(where: { $0.tools[0] == tool }) {
@@ -245,6 +248,12 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
 
         brushOptions = stack([label("Size", size: 11, color: .secondaryLabelColor), sizeSlider, sizeValue], vertical: false, spacing: 8)
         opacityOptions = stack([label("Opacity", size: 11, color: .secondaryLabelColor), opacitySlider, opacityValue], vertical: false, spacing: 8)
+        strengthOptions = stack([label("Strength", size: 11, color: .secondaryLabelColor), strengthSlider, strengthValue], vertical: false, spacing: 6)
+        strengthSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        strengthSlider.target = self; strengthSlider.action = #selector(strengthChanged); strengthSlider.isContinuous = true
+        strengthSlider.setAccessibilityLabel("Retouch strength")
+        strengthSlider.toolTip = "Strength of Blur, Sharpen, and Smudge. Repeated passes build the effect."
+        strengthValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
         hardnessOptions = stack([label("Hardness", size: 11, color: .secondaryLabelColor), hardnessSlider, hardnessValue], vertical: false, spacing: 6)
         hardnessSlider.widthAnchor.constraint(equalToConstant: 70).isActive = true
         hardnessValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
@@ -306,7 +315,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         shapeAlignmentPopup.setAccessibilityLabel("Shape outline alignment")
         shapeAlignmentPopup.toolTip = "Inside: dragged boundary is the outer edge. Center: boundary is the stroke center. Outside: boundary is the inner edge."
         shapeAlignmentOptions = stack([label("Outline", size: 11, color: .secondaryLabelColor), shapeAlignmentPopup], vertical: false, spacing: 6)
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, pixelAlignment, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, strengthOptions, hardnessOptions, edgeMode, pixelAlignment, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
         toolOptionsScroll = ToolOptionsScrollView(options: optionStack)
         toolOptionsScroll.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(toolOptionsScroll)
         toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
@@ -596,12 +605,13 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             return
         }
         canvas.tool = tool; toolTitle.stringValue = tool.title
-        brushOptions.isHidden = ![.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
+        brushOptions.isHidden = !(tool.isBrush || tool.isGeometry)
         selectionOptions.isHidden = !tool.isSelection
         textOptions.isHidden = tool != .text
         opacityOptions.isHidden = !tool.isPainting
-        hardnessOptions.isHidden = ![.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
-        edgeMode.isHidden = !(tool.isPainting || tool.isSelection)
+        strengthOptions.isHidden = !tool.isRetouch
+        hardnessOptions.isHidden = !(tool.isBrush || tool.isGeometry)
+        edgeMode.isHidden = !(tool.isPainting || tool.isSelection || tool.isRetouch)
         updateShapeControls()
         toolOptionsScroll.settingsChanged()
         for (key, button) in toolButtons { button.selected = key == tool }
@@ -905,6 +915,10 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         sizeValue.stringValue = "\(Int(canvas.brushSize)) px"
         opacityValue.stringValue = "\(Int(opacitySlider.doubleValue))%"
         canvas.needsDisplay = true
+    }
+    @objc private func strengthChanged() {
+        canvas.retouchStrength = strengthSlider.doubleValue / 100
+        strengthValue.stringValue = "\(Int(strengthSlider.doubleValue.rounded()))%"
     }
     @objc private func toleranceChanged() { canvas.tolerance = toleranceSlider.integerValue }
     @objc private func colorChanged(_ sender: NSColorWell) { setColor(PixelColor(sender.color), alternate: sender === alternateColorWell) }

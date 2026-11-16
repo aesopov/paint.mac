@@ -73,7 +73,7 @@ extension PaintTool {
         case .ellipse: return .ellipse
         case .text: return .text
         case .crop: return .crop
-        case .lasso, .hand: return nil
+        case .lasso, .hand, .blur, .sharpen, .smudge: return nil
         }
     }
     var icon: NSImage {
