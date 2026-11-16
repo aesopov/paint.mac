@@ -63,9 +63,7 @@ private final class ToolVariantButton: NSButton {
         }
         let font = NSFont.systemFont(ofSize: 12)
         if current { ("✓" as NSString).draw(at: NSPoint(x: 8, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.labelColor]) }
-        NSImage(systemSymbolName: tool.symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.labelColor]))?.draw(in: NSRect(x: 27, y: 8, width: 16, height: 16),
-            from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        EditorIcon.draw(tool.icon, in: NSRect(x: 27, y: 8, width: 16, height: 16))
         (tool.title as NSString).draw(at: NSPoint(x: 52, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.labelColor])
         (tool.key.uppercased() as NSString).draw(at: NSPoint(x: bounds.width - 20, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
     }
@@ -99,7 +97,7 @@ final class ToolGroupButton: ToolButton {
     func setCurrentTool(_ tool: PaintTool) {
         guard group.tools.contains(tool) else { return }
         currentTool = tool
-        image = NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.title)
+        image = tool.icon
         setAccessibilityLabel("\(group.title): \(tool.title)")
         setAccessibilityHelp("Hover to show tool types on the right. Click to select \(tool.title).")
         toolTip = "\(group.title) · \(tool.title) (\(tool.key.uppercased())) · Hover or right-click for types"

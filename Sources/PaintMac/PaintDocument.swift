@@ -44,6 +44,17 @@ struct DocumentState: Equatable {
     var activeID: UUID { didSet { if activeID != oldValue { editingMask = false } } }
     var editingMask = false
     var selection: SelectionMask? = nil
+    /// Session-only selection pixels. While active, selection is a local marquee
+    /// restricting edits to this buffer, independently of the document layers.
+    var quickMask: SelectionMask? = nil
+    var isQuickMask: Bool { quickMask != nil }
+    var isEditingCoverage: Bool { isQuickMask || isEditingMask }
+    var editingTargetVisible: Bool { isQuickMask || activeEffectivelyVisible }
+
+    mutating func toggleQuickMask() {
+        if let mask = quickMask { selection = mask; quickMask = nil }
+        else { quickMask = selection ?? .all(width: width, height: height); selection = nil }
+    }
 
     init(width: Int = 1200, height: Int = 800, format: RGBFormat = .standard, resolution: ImageResolution = .standard) {
         self.width = width; self.height = height; self.format = format; self.resolution = resolution
@@ -59,9 +70,10 @@ struct DocumentState: Equatable {
     }
     var isEditingMask: Bool { editingMask && activeLayer.mask != nil }
     var editingRaster: Raster {
-        get { isEditingMask ? activeLayer.mask!.editingRaster : activeLayer.raster }
+        get { quickMask?.editingRaster ?? (isEditingMask ? activeLayer.mask!.editingRaster : activeLayer.raster) }
         set {
-            if isEditingMask { layers[activeIndex].mask = SelectionMask(editingRaster: newValue) }
+            if isQuickMask { quickMask = SelectionMask(editingRaster: newValue) }
+            else if isEditingMask { layers[activeIndex].mask = SelectionMask(editingRaster: newValue) }
             else { layers[activeIndex].raster = newValue }
         }
     }

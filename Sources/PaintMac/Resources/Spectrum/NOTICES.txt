@@ -1,0 +1,10 @@
+Adobe Spectrum Workflow Icons
+Source: https://github.com/adobe/spectrum-css-workflow-icons
+Package: @adobe/spectrum-css-workflow-icons 1.7.0 (legacy 18 px set)
+© Copyright 2015-2022 Adobe. All rights reserved.
+Licensed under the Apache License, Version 2.0; see LICENSE and COPYRIGHT.
+
+Paint.MAC includes a selected subset. The SVG source files are unmodified.
+The PDF files are derived vector conversions made by Paint.MAC using librsvg.
+Sizing, template tinting, and action mappings are supplied by Paint.MAC.
+Adobe does not endorse or sponsor Paint.MAC. No Adobe product logos are used.

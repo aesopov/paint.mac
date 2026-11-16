@@ -108,6 +108,7 @@ extension PaintDocument {
         if let size = pixelSize {
             next.width = Int(size.width); next.height = Int(size.height)
             next.selection = next.selection?.scaled(width: next.width, height: next.height, smooth: smooth)
+            next.quickMask = next.quickMask?.scaled(width: next.width, height: next.height, smooth: smooth)
         }
         next.format = format; next.resolution = resolution
         let previous = state; state = next; commit(previous, name: "Color & Resolution")

@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "PaintMac", targets: ["PaintMac"])],
     targets: [
-        .executableTarget(name: "PaintMac", swiftSettings: [.swiftLanguageMode(.v5)]),
+        .executableTarget(name: "PaintMac", resources: [.copy("Resources/Spectrum")], swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "PaintMacTests", dependencies: ["PaintMac"], swiftSettings: [.swiftLanguageMode(.v5)])
     ]
 )

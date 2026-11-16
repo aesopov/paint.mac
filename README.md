@@ -2,9 +2,11 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.15.1 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.16.1 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
 
 Right-click a layer row for rename, duplicate, visibility, lock, grouping/reordering, merge, clipping, and mask actions. Text/effect layers expose their edit actions; groups expose collapse/expand and ungroup. Actions respect locks, clipping stacks, group rules, and layer limits. Right-clicking an unselected row selects it; right-clicking a selected row preserves the multi-selection and offers bulk grouping/movement/deletion. Shift-F10 or the accessibility Show Menu action opens the selected row’s menu.
+
+Editor actions use a bundled subset of **Adobe Spectrum Workflow Icons 1.7.0**, including the legacy Merge Layers glyph. SVG sources and vector PDF conversions, the Apache 2.0 license, copyright notice, and provenance are included in `Sources/PaintMac/Resources/Spectrum` and the standalone app’s resource bundle. Native template tinting follows light/dark appearance and disabled states. Standard macOS controls retain SF Symbols. Normal builds need no network or icon tooling; `python3 scripts/vendor-spectrum-icons.py` regenerates the pinned subset with upstream SHA-512 verification and requires `curl` and `rsvg-convert`. Paint.MAC is independent of Adobe.
 
 ## Color and resolution
 
@@ -74,7 +76,8 @@ PAINTMAC_METAL_BENCHMARK=1 swift test -c release --filter MetalCanvasTests/testR
 | --- | --- |
 | Brush / Eraser | B / E |
 | Rectangle Select / Move Pixels | S / V |
-| Ellipse Select / Lasso Select | M / Q |
+| Ellipse Select / Lasso Select | M / A |
+| Quick Mask | Q |
 | Paint Bucket / Color Picker | F / I |
 | Line / Rectangle / Ellipse | L / R / O |
 | Text / Crop to current selection | T / C |
@@ -85,7 +88,9 @@ PAINTMAC_METAL_BENCHMARK=1 swift test -c release --filter MetalCanvasTests/testR
 | Constrain drawn shapes | Shift while dragging |
 | Constrain rectangle/ellipse selections | Control while dragging |
 | Add / subtract / intersect selection | Shift / Option / Shift-Option when starting a selection |
-| Sample visible color | Option-click |
+| Draw shapes from center | Hold Option while dragging |
+| Draw rectangle/ellipse marquee from center | Start dragging, then hold Option |
+| Sample visible color | Option-click with brush/eraser or use Color Picker |
 | Zoom around pointer | Mouse wheel or pinch |
 | Pan with wheel | Option-scroll (both axes) / Shift-scroll (horizontal) |
 | Fit / Actual size | Command-0 / Command-1 |
@@ -139,7 +144,7 @@ Moving image pixels moves the mask with them; selecting the mask thumbnail lets 
 
 The tool rail groups **Selections** (Rectangle, Ellipse, Lasso) and **Shapes** (Rectangle, Ellipse, Line). Each button shows and remembers its last type. Hover to open a menu on the right, where a checkmark identifies the current type; click a row to choose another. Clicking the rail button selects its remembered type. Right-click also opens the menu; use Up/Down and Return to choose, or Escape to close. Existing tool shortcuts update the remembered type. Hovering preserves text drafts, focus, selections, and undo history.
 
-Choose Rectangle Select (S), Ellipse Select (M), or Lasso Select (Q). The options bar offers Replace, Add, Subtract, and Intersect. Hold Shift to add, Option to subtract, or both to intersect when beginning a gesture; these modifiers override the options-bar mode for that gesture. Control constrains rectangle and ellipse dimensions. Escape cancels an in-progress selection or deselects when idle.
+Choose Rectangle Select (S), Ellipse Select (M), or Lasso Select (A). The options bar offers Replace, Add, Subtract, and Intersect. Hold Shift to add, Option to subtract, or both to intersect when beginning a gesture; these modifiers override the options-bar mode for that gesture. Control constrains rectangle and ellipse dimensions. Escape cancels an in-progress selection or deselects when idle.
 
 Use **Selection → Feather Selection…**, or the **Feather…** button, to soften the current selection with a Gaussian radius in image pixels. This blurs mask coverage, not image pixels. Painting and subsequent edits fade across the softened edge. The outline follows 50% coverage; the shading also shows softer coverage beyond it. Feathering can be applied repeatedly or undone. **Selection → Invert Selection** selects the opposite coverage, including holes and disconnected areas.
 
@@ -254,3 +259,15 @@ Only Normal layer blending is implemented. Layer styles (shadow/outline/glow), m
 Undo uses a private, per-document session cache under `~/Library/Application Support/Paint.MAC/UndoCache-v1`. Unchanged tile versions are shared; older pixels are compressed with LZFSE and verified with SHA-256. Disk writes run on a utility queue; a tile stays in RAM until its file has been written and verified. The history cache targets 128 MiB of resident pixels and a 2 GiB allocated disk footprint; in-flight writes can temporarily exceed the RAM target. Completed oldest undo groups are pruned when the disk budget is exceeded. Metadata is capped separately at approximately 16 MiB, with a maximum of 500 recorded actions. History can exceed the previous 40-step limit. Cold undo may wait for disk reads; loading validates all required tiles before replacing the current state. If disk caching is unavailable, history falls back to its RAM budget. Cache sessions are removed on document close; exclusive session locks protect other running instances during abandoned-session cleanup. Undo is session-only and is not saved in projects. Existing v1–v5 projects remain readable; v6 preserves nondefault color/resolution settings.
 
 The next engineering priority is moving expensive pixel edits and cold-history loading off the main thread. The next editing priorities are magic wand selections and transform handles.
+
+### Quick Mask and off-image gestures
+
+Drawing and selection gestures can start in the viewport outside the image; pixels are clipped to the image edges. The anchor stays outside, allowing partial rectangles, ellipses and brush strokes.
+
+Press **Q** or click **Quick Mask** at the bottom of the tool rail to edit the selection as a temporary grayscale image. Red shows selected coverage; white adds and black or the eraser removes it. An unrestricted selection starts fully red. Brush hardness, opacity, shapes, bucket, text and adjustments work on this temporary mask. Selection tools create a local marquee that restricts mask edits; use Move to reposition the selected mask pixels. Press Q again to use the result as the normal selection. **A** now selects the lasso. Undo/redo restores the mode, mask and local marquee together, including disk-cached history. Quick Mask is session-only, and its red overlay is excluded from exports and project artwork.
+
+### Center-origin geometry and outline alignment
+
+Hold **Option** while drawing a rectangle, ellipse, or line to expand from the initial point in both directions; **Shift** still constrains shape proportions/line angles. For rectangle/ellipse marquees, begin dragging and then hold Option for a center origin; **Control** constrains the marquee. Modifiers can be pressed or released during the drag, updating the preview even without moving the pointer. Option held before starting a selection retains Subtract, and Shift+Option retains Intersect.
+
+Rectangle/ellipse **Outline** offers **Inside**, **Center** (the existing default), and **Outside**. The dragged rectangle specifies the outer bound, stroke center, or inner bound respectively. For example, Inside keeps a 10-pixel outline within `(10, 10)…(100, 100)`; Center extends it to `(5, 5)…(105, 105)`. Marquees have no painted thickness and always use their exact boundary. Alignment works with fills, antialiasing, hardness, layer masks, Quick Mask, and high precision RGB. Scroll the options row horizontally if it exceeds the window width.

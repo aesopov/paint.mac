@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         }
         func add(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String = "", modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.image = EditorIcon.forAction(action)
             item.keyEquivalentModifierMask = modifiers; item.target = target ?? self
             menu.addItem(item)
         }
@@ -95,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         add(selection, "Invert Selection", #selector(invertSelection), "i", modifiers: [.command, .option])
         selection.addItem(.separator())
         add(selection, "Feather Selection…", #selector(featherSelection))
+        selection.addItem(.separator())
+        add(selection, "Quick Mask", #selector(toggleQuickMask), "q", modifiers: [])
 
         let image = menu("Image")
         add(image, "Image & Canvas Size…", #selector(resizeImage), "r", modifiers: [.command, .option])
@@ -108,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         let tools = menu("Tools")
         for tool in PaintTool.allCases {
             let item = NSMenuItem(title: "\(tool.title) (\(tool.key.uppercased()))", action: #selector(chooseTool(_:)), keyEquivalent: "")
+            item.image = tool.icon; item.image?.size = NSSize(width: 16, height: 16)
             item.target = self; item.representedObject = tool.rawValue
             tools.addItem(item)
         }
@@ -118,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         add(layer, "Edit Text / Effect…", #selector(editLayerContent))
         add(layer, "Rasterize Text Layer", #selector(rasterizeTextLayer))
         let effectItem = NSMenuItem(title: "New Effect Layer", action: nil, keyEquivalent: "")
+        effectItem.image = EditorIcon.effects.image(size: 16)
         let effects = NSMenu(); effectItem.submenu = effects
         for kind in EffectKind.allCases {
             let item = NSMenuItem(title: kind.title + "…", action: #selector(addEffectLayer(_:)), keyEquivalent: "")
@@ -139,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         add(layer, "Create Clipping Mask", #selector(toggleClipping), "g", modifiers: [.command, .option])
         layer.addItem(.separator())
         let maskItem = NSMenuItem(title: "Layer Mask", action: nil, keyEquivalent: "")
+        maskItem.image = EditorIcon.mask.image(size: 16)
         maskItem.submenu = LayerMaskCommand.menu(target: self, action: #selector(layerMaskCommand(_:)))
         layer.addItem(maskItem)
 
@@ -305,6 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func grayscaleImage() { editor?.applyAdjustment("CIPhotoEffectMono", name: "Grayscale") }
     @objc func selectRectangle() { editor?.selectTool(.selection) }
     @objc func selectEllipse() { editor?.selectTool(.ellipseSelect) }
+    @objc func toggleQuickMask() { editor?.toggleQuickMask() }
     @objc func selectLasso() { editor?.selectTool(.lasso) }
     @objc func invertSelection() { editor?.invertSelection() }
     @objc func featherSelection() { editor?.featherSelection() }
@@ -336,13 +343,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
     @objc func zoomFit() { editor?.canvas.zoomToFit() }
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.15.1",
-            .credits: NSAttributedString(string: "A small, native home for your pixels.\nBuilt with Swift, AppKit, and Metal-backed Core Image.\nAn independent editor inspired by the Paint.NET workflow.")
+            .applicationName: "Paint.MAC", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.16.1",
+            .credits: NSAttributedString(string: "A small, native home for your pixels.\nBuilt with Swift, AppKit, and Metal-backed Core Image.\nAn independent editor inspired by the Paint.NET workflow.\nEditor icons: Adobe Spectrum · Apache License 2.0.")
         ])
     }
     @objc func showHelp() {
         let alert = NSAlert(); alert.messageText = "Make yourself at home."
-        alert.informativeText = "B Brush · E Eraser · S Rectangle Select · V Move\nM Ellipse Select · Q Lasso Select\nF Fill · I Color Picker · L Line\nR Rectangle · O Ellipse · H Hand\nT Text · C Crop to Selection\nText: drag a box, type, move by its bar, resize by its corner.\n⌘Return finishes editing; Escape cancels.\n\nLeft mouse: main color. Right mouse: alternate color.\nPress the opposite mouse button to cancel a gesture.\nRelease both buttons before drawing again.\nX swaps colors. Right-click a palette swatch to set the alternate.\nSmooth/Sharp toggles edge antialiasing.\n\nMiddle mouse drag or Space + drag pans the canvas.\nMouse wheel or pinch zooms around the pointer.\n⌥ scroll pans; ⇧ scroll pans horizontally.\n[ and ] adjust brush size.\nSelection: ⇧ adds, ⌥ subtracts, ⇧⌥ intersects.\nControl constrains selections; Shift constrains drawn shapes.\nSelection → Feather Selection… softens the selection edge.\nOption-click samples the visible color.\nDelete clears pixels in the active layer.\n\n⌘O opens multiple files in tabs. Control-Tab switches tabs.\n⌥⌘R opens Image & Canvas Size.\n⌘S saves a layered .paintmac project.\n⇧⌘E exports PNG, JPEG, ICO, or ICNS.\nDouble-click text/effect layers to edit them; other layers to rename.\nLayer → New Effect Layer adds a live adjustment.\nLayer → Rasterize Text Layer enables pixel editing.\nMerge Down in the Layers panel (⇧⌘M) combines it with the layer below.\nLayers ▾ offers groups and clipping masks.\n⌘G groups selected layers; ⇧⌘G ungroups.\n⌥⌘G clips to the lower base layer.\nLayer Mask below it adds or manages a mask.\nClick a layer image or mask thumbnail to choose the editing target.\nOn masks: black hides, white reveals, gray is partial visibility.\nMask editing switches the palette to grayscale; X swaps black/white."
+        alert.informativeText = "B Brush · E Eraser · S Rectangle Select · V Move\nM Ellipse Select · A Lasso Select · Q Quick Mask\nF Fill · I Color Picker · L Line\nR Rectangle · O Ellipse · H Hand\nT Text · C Crop to Selection\nText: drag a box, type, move by its bar, resize by its corner.\n⌘Return finishes editing; Escape cancels.\n\nLeft mouse: main color. Right mouse: alternate color.\nPress the opposite mouse button to cancel a gesture.\nRelease both buttons before drawing again.\nX swaps colors. Right-click a palette swatch to set the alternate.\nSmooth/Sharp toggles edge antialiasing.\n\nMiddle mouse drag or Space + drag pans the canvas.\nMouse wheel or pinch zooms around the pointer.\n⌥ scroll pans; ⇧ scroll pans horizontally.\n[ and ] adjust brush size.\nSelection: ⇧ adds, ⌥ subtracts, ⇧⌥ intersects.\nControl constrains selections; Shift constrains drawn shapes.\nOption draws shapes from the center. For marquees, start dragging before pressing Option.\nOption before a marquee drag keeps Subtract; Shift+Option keeps Intersect.\nShape Outline: Inside uses the outer bound, Center the stroke center, Outside the inner bound.\nSelection → Feather Selection… softens the selection edge.\nQ toggles Quick Mask: red shows selected pixels.\nWhite adds selection; black/eraser removes it.\nSelect a region then Move to reposition mask pixels.\nOption-click with the brush/eraser samples the visible color.\nDelete clears pixels in the active layer.\n\n⌘O opens multiple files in tabs. Control-Tab switches tabs.\n⌥⌘R opens Image & Canvas Size.\n⌘S saves a layered .paintmac project.\n⇧⌘E exports PNG, JPEG, ICO, or ICNS.\nDouble-click text/effect layers to edit them; other layers to rename.\nLayer → New Effect Layer adds a live adjustment.\nLayer → Rasterize Text Layer enables pixel editing.\nMerge Down in the Layers panel (⇧⌘M) combines it with the layer below.\nLayers ▾ offers groups and clipping masks.\n⌘G groups selected layers; ⇧⌘G ungroups.\n⌥⌘G clips to the lower base layer.\nLayer Mask below it adds or manages a mask.\nClick a layer image or mask thumbnail to choose the editing target.\nOn masks: black hides, white reveals, gray is partial visibility.\nMask editing switches the palette to grayscale; X swaps black/white."
         alert.runModal()
     }
 
@@ -351,6 +358,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         if action == #selector(newImage) || action == #selector(openImage) || action == #selector(about) || action == #selector(showHelp) { return true }
         guard let editor else { return false }
         let state = editor.paintDocument.state
+        if action == #selector(toggleQuickMask) {
+            (item as? NSMenuItem)?.state = state.isQuickMask ? .on : .off
+            return !(NSApp.keyWindow?.firstResponder is NSTextView)
+        }
         if action == #selector(layerMaskCommand(_:)), let item = item as? NSMenuItem,
            let raw = item.representedObject as? String, let command = LayerMaskCommand(rawValue: raw) {
             item.title = command.title(in: state)
@@ -395,17 +406,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSUserInterfaceValidat
         }
         if action == #selector(duplicateLayer) { return state.layers.count + state.subtreeIDs(state.activeID).count <= 32 }
         if action == #selector(addLayer) || action == #selector(importImage) || action == #selector(newGroup) || action == #selector(groupSelected) { return state.layers.count < 32 }
-        if action == #selector(copyPixels), state.activeLayer.effect != nil, !state.isEditingMask {
+        if action == #selector(copyPixels), state.activeLayer.effect != nil, !state.isEditingCoverage {
             return NSApp.keyWindow?.firstResponder is NSTextView
         }
         if action == #selector(deletePixels), NSApp.keyWindow?.firstResponder is LayerTableView { return state.canRemoveLayers(editor.selectedLayerIDs) }
         if action == #selector(deletePixels) || action == #selector(cutPixels) || action == #selector(invertImage) || action == #selector(grayscaleImage) {
             if (action == #selector(deletePixels) || action == #selector(cutPixels)), NSApp.keyWindow?.firstResponder is NSTextView { return true }
-            return state.canPaintTarget && state.activeEffectivelyVisible
+            return state.canPaintTarget && state.editingTargetVisible
         }
         if action == #selector(pastePixels) {
             if NSApp.keyWindow?.firstResponder is NSTextView { return true }
-            return NSPasteboard.general.availableType(from: [.png, .tiff]) != nil && state.layers.count < 32
+            return NSPasteboard.general.availableType(from: [.png, .tiff]) != nil && (state.isQuickMask || state.layers.count < 32)
         }
         return true
     }

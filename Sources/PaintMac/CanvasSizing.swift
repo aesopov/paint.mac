@@ -76,6 +76,11 @@ extension PaintDocument {
                 ? mask.scaled(width: plan.width, height: plan.height, smooth: smooth)
                 : mask.translated(dx: plan.offsetX, dy: plan.offsetY, width: plan.width, height: plan.height)
         }
+        if let mask = state.quickMask {
+            next.quickMask = mode == .scale
+                ? mask.scaled(width: plan.width, height: plan.height, smooth: smooth)
+                : mask.translated(dx: plan.offsetX, dy: plan.offsetY, width: plan.width, height: plan.height)
+        }
         next.width = plan.width; next.height = plan.height
         let previous = state; state = next
         commit(previous, name: mode == .scale ? "Scale Image" : "Resize Canvas")

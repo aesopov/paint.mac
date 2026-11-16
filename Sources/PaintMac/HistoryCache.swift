@@ -217,6 +217,8 @@ final class HistorySnapshot {
     private let clipBounds: [CGRect?]
     private let selection: Grid?
     private let selectionBounds: CGRect?
+    private let quickMask: Grid?
+    private let quickMaskBounds: CGRect?
     private let cache: HistoryTileCache
     private let ids: Set<UUID>
     let metadataBytes: Int
@@ -226,6 +228,7 @@ final class HistorySnapshot {
         masks = state.layers.map { $0.mask.map { Grid($0.storage) } }; maskBounds = state.layers.map { $0.mask?.bounds }
         clips = state.layers.map { $0.textClip.map { Grid($0.storage) } }; clipBounds = state.layers.map { $0.textClip?.bounds }
         selection = state.selection.map { Grid($0.storage) }; selectionBounds = state.selection?.bounds
+        quickMask = state.quickMask.map { Grid($0.storage) }; quickMaskBounds = state.quickMask?.bounds
         var tiles: [UUID: PixelTile] = [:]
         func collect(_ grid: TileGrid) { for tile in grid.tiles.values { tiles[tile.id] = tile } }
         for i in state.layers.indices {
@@ -237,6 +240,7 @@ final class HistorySnapshot {
             metadata.layers[i].mask = nil; metadata.layers[i].textClip = nil
         }
         if let mask = state.selection { collect(mask.storage) }; metadata.selection = nil
+        if let mask = state.quickMask { collect(mask.storage) }; metadata.quickMask = nil
         ids = Set(tiles.keys); tiles.values.forEach(cache.retain)
         metadataBytes = state.format.profile.icc.count + tiles.count * 48 + state.layers.reduce(256) { $0 + 256 + $1.name.utf8.count + ($1.text?.string.utf8.count ?? 0) }
     }
@@ -248,6 +252,7 @@ final class HistorySnapshot {
             if let clip = clips[i] { state.layers[i].textClip = SelectionMask(storage: try clip.restored(cache), bounds: clipBounds[i]!) }
         }
         if let selection { state.selection = SelectionMask(storage: try selection.restored(cache), bounds: selectionBounds!) }
+        if let quickMask { state.quickMask = SelectionMask(storage: try quickMask.restored(cache), bounds: quickMaskBounds!) }
         return state
     }
     deinit { cache.release(ids) }

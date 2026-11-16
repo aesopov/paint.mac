@@ -31,6 +31,11 @@ enum LayerMaskCommand: String, CaseIterable {
         for command in allCases {
             if command == .invert || command == .apply { menu.addItem(.separator()) }
             let item = NSMenuItem(title: command.title(in: state), action: action, keyEquivalent: "")
+            switch command {
+            case .revealAll, .hideAll, .fromSelection: item.image = EditorIcon.mask.image(size: 16)
+            case .apply: item.image = EditorIcon.merge.image(size: 16)
+            default: break
+            }
             item.target = target; item.representedObject = command.rawValue
             if let state { item.isEnabled = command.isEnabled(in: state) }
             menu.addItem(item)
@@ -53,7 +58,7 @@ final class LayerThumbnailButton: NSButton {
         disabledMask = mask && !layer.maskEnabled
         showsTransparency = !mask && !layer.isGroup && layer.effect == nil
         if (layer.isGroup || layer.effect != nil) && !mask {
-            preview = NSImage(systemSymbolName: layer.isGroup ? "folder.fill" : "camera.filters", accessibilityDescription: layer.isGroup ? "Layer group" : "Effect layer")!
+            preview = layer.isGroup ? NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Layer group")! : EditorIcon.effects.image(description: "Effect layer")
         } else {
             let raster = mask ? layer.mask!.editingRaster : layer.raster
             let scale = min(1, min(80 / CGFloat(raster.width), 64 / CGFloat(raster.height)))

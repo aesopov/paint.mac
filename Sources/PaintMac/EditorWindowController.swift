@@ -102,6 +102,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let mergeDownButton = NSButton(title: "Merge Down", target: nil, action: nil)
     private let maskButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private var editingMaskColors = false
+    private let quickMaskButton = NSButton()
     private var pixelColors: (PixelColor, PixelColor)?
     private var paletteButtons: [SwatchButton] = []
     private let layerCount = label("2", size: 11, color: .tertiaryLabelColor)
@@ -116,6 +117,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let selectionModePopup = NSPopUpButton()
     private let featherButton = NSButton(title: "Feather…", target: nil, action: nil)
     private let edgeMode = NSSegmentedControl(labels: ["Smooth", "Sharp"], trackingMode: .selectOne, target: nil, action: nil)
+    private let shapeAlignmentPopup = NSPopUpButton()
+    private var shapeAlignmentOptions: NSStackView!
+    private var toolOptionsScroll: ToolOptionsScrollView!
     private let shapeFill = NSButton(checkboxWithTitle: "Filled", target: nil, action: nil)
     private var textOptions: NSStackView!
     private var opacityOptions: NSStackView!
@@ -193,7 +197,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
                 grouped.onChoose = { [weak self] in self?.selectTool($0) }
                 toolGroupButtons[group] = grouped; button = grouped
             } else {
-                button = ToolButton(image: NSImage(systemSymbolName: tool.symbol, accessibilityDescription: tool.title)!, target: self, action: #selector(toolClicked(_:)))
+                button = ToolButton(image: tool.icon, target: self, action: #selector(toolClicked(_:)))
                 button.tag = PaintTool.allCases.firstIndex(of: tool)!; button.isBordered = false; button.imagePosition = .imageOnly
                 button.imageScaling = .scaleProportionallyDown
                 button.toolTip = "\(tool.title) (\(tool.key.uppercased()))"; button.setAccessibilityLabel(tool.title)
@@ -203,6 +207,15 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             button.heightAnchor.constraint(equalToConstant: 34).isActive = true
             tools.append(button)
         }
+        quickMaskButton.image = EditorIcon.mask.image()
+        quickMaskButton.imagePosition = .imageOnly; quickMaskButton.imageScaling = .scaleProportionallyDown
+        quickMaskButton.setButtonType(.toggle); quickMaskButton.bezelStyle = .texturedRounded
+        quickMaskButton.target = self; quickMaskButton.action = #selector(toggleQuickMask)
+        quickMaskButton.toolTip = "Quick Mask (Q) · edit the selection as pixels"
+        quickMaskButton.setAccessibilityLabel("Quick Mask")
+        quickMaskButton.widthAnchor.constraint(equalToConstant: 38).isActive = true
+        quickMaskButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        tools.append(quickMaskButton)
         let toolStack = stack(tools, spacing: 4)
         let toolScroll = NSScrollView()
         toolScroll.drawsBackground = false; toolScroll.hasVerticalScroller = true
@@ -248,8 +261,15 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         shapeFill.target = self; shapeFill.action = #selector(shapeFillChanged)
         shapeFill.setAccessibilityLabel("Fill shapes")
         shapeFill.toolTip = "Left mouse: main outline, alternate fill. Right mouse: alternate outline, main fill."
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeFill], vertical: false, spacing: 10)
-        optionStack.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(optionStack)
+        shapeAlignmentPopup.addItems(withTitles: ShapeOutlineAlignment.allCases.map(\.rawValue))
+        shapeAlignmentPopup.selectItem(withTitle: canvas.shapeAlignment.rawValue)
+        shapeAlignmentPopup.target = self; shapeAlignmentPopup.action = #selector(shapeAlignmentChanged)
+        shapeAlignmentPopup.setAccessibilityLabel("Shape outline alignment")
+        shapeAlignmentPopup.toolTip = "Inside: dragged boundary is the outer edge. Center: boundary is the stroke center. Outside: boundary is the inner edge."
+        shapeAlignmentOptions = stack([label("Outline", size: 11, color: .secondaryLabelColor), shapeAlignmentPopup], vertical: false, spacing: 6)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeFill, shapeAlignmentOptions], vertical: false, spacing: 10)
+        toolOptionsScroll = ToolOptionsScrollView(options: optionStack)
+        toolOptionsScroll.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(toolOptionsScroll)
         toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
         sizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
         sizeValue.widthAnchor.constraint(equalToConstant: 44).isActive = true
@@ -258,8 +278,10 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         opacitySlider.target = self; opacitySlider.action = #selector(brushChanged); opacitySlider.isContinuous = true
         sizeSlider.setAccessibilityLabel("Brush size")
         opacitySlider.setAccessibilityLabel("Brush opacity")
-        NSLayoutConstraint.activate([optionStack.leadingAnchor.constraint(equalTo: options.leadingAnchor, constant: 20),
-                                     optionStack.centerYAnchor.constraint(equalTo: options.centerYAnchor)])
+        NSLayoutConstraint.activate([toolOptionsScroll.leadingAnchor.constraint(equalTo: options.leadingAnchor),
+                                     toolOptionsScroll.trailingAnchor.constraint(equalTo: options.trailingAnchor),
+                                     toolOptionsScroll.topAnchor.constraint(equalTo: options.topAnchor),
+                                     toolOptionsScroll.bottomAnchor.constraint(equalTo: options.bottomAnchor)])
 
         for (well, field, alternate) in [(colorWell, hexField, false), (alternateColorWell, alternateHexField, true)] {
             well.color = (alternate ? canvas.alternateColor : canvas.color).nsColor
@@ -367,7 +389,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let layerActions = stack(buttons, vertical: false, spacing: 9)
         mergeDownButton.target = self; mergeDownButton.action = #selector(mergeSelected)
         mergeDownButton.bezelStyle = .rounded
-        mergeDownButton.image = NSImage(systemSymbolName: "arrow.down.to.line", accessibilityDescription: nil)
+        mergeDownButton.image = EditorIcon.merge.image(size: 16)
         mergeDownButton.imagePosition = .imageLeading
         mergeDownButton.setAccessibilityLabel("Merge Down")
         mergeDownButton.widthAnchor.constraint(equalToConstant: 116).isActive = true
@@ -410,7 +432,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         return field
     }
     private func iconButton(_ symbol: String, help: String, action: Selector) -> NSButton {
-        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: help)!, target: self, action: action)
+        let button = NSButton(image: EditorIcon.forAction(action, size: 18) ?? NSImage(systemSymbolName: symbol, accessibilityDescription: help)!, target: self, action: action)
         button.isBordered = false; button.contentTintColor = .secondaryLabelColor; button.toolTip = help
         button.widthAnchor.constraint(equalToConstant: 30).isActive = true
         button.heightAnchor.constraint(equalToConstant: 26).isActive = true
@@ -456,6 +478,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         defer { refreshing = false }
         canvas.needsDisplay = true
         synchronizeMaskColors()
+        quickMaskButton.state = paintDocument.state.isQuickMask ? .on : .off
         canvas.refreshTextPreview()
         for id in paintDocument.state.ancestors(of: paintDocument.state.activeID) {
             if let index = paintDocument.state.layers.firstIndex(where: { $0.id == id }) { paintDocument.state.layers[index].expanded = true }
@@ -512,6 +535,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             dimensions.stringValue = "Selection \(size) · \(state.width) × \(state.height) px"
         }
         else { dimensions.stringValue = "\(state.width) × \(state.height) px · \(state.format.profile.name) · \(state.format.depth.rawValue)-bit" }
+        if state.isQuickMask { dimensions.stringValue = "Quick Mask · " + dimensions.stringValue }
         dimensions.toolTip = String(format: "%.6g × %.6g PPI · %.3f × %.3f inches", state.resolution.x, state.resolution.y, Double(state.width) / state.resolution.x, Double(state.height) / state.resolution.y)
     }
     private func refreshZoom() { zoomButton.title = "\(Int((canvas.zoom * 100).rounded()))% ▾" }
@@ -530,6 +554,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         hardnessOptions.isHidden = ![.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
         edgeMode.isHidden = !(tool.isPainting || tool.isSelection)
         shapeFill.isHidden = tool != .rectangle && tool != .ellipse
+        shapeAlignmentOptions.isHidden = shapeFill.isHidden
+        toolOptionsScroll.settingsChanged()
         for (key, button) in toolButtons { button.selected = key == tool }
         for (group, button) in toolGroupButtons {
             button.dismissFlyout()
@@ -543,6 +569,10 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     @objc private func edgeModeChanged() {
         canvas.smooth = edgeMode.selectedSegment == 0
         canvas.focusText()
+    }
+    @objc private func shapeAlignmentChanged() {
+        canvas.shapeAlignment = ShapeOutlineAlignment.allCases[shapeAlignmentPopup.indexOfSelectedItem]
+        window?.makeFirstResponder(canvas)
     }
     @objc private func shapeFillChanged() {
         canvas.fillShapes = shapeFill.state == .on
@@ -562,9 +592,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         }
     }
     func paintText(_ text: String, at point: CGPoint, font: NSFont, color: PixelColor, opacity: Double, antialias: Bool) {
-        guard paintDocument.state.activeEffectivelyVisible, paintDocument.state.canPaintTarget else { NSSound.beep(); return }
+        guard paintDocument.state.editingTargetVisible, paintDocument.state.canPaintTarget else { NSSound.beep(); return }
         paintDocument.edit("Text") { state in
-            let selection = state.selection, color = state.isEditingMask ? color.maskColor : color
+            let selection = state.selection, color = state.isEditingCoverage ? color.maskColor : color
             state.editRaster { $0.drawText(text, at: point, font: font, color: color,
                                           opacity: opacity, antialias: antialias, selection: selection) }
         }
@@ -619,6 +649,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let menu = NSMenu(); menu.autoenablesItems = false
         for kind in EffectKind.allCases {
             let item = NSMenuItem(title: kind.title + "…", action: #selector(addEffectLayer(_:)), keyEquivalent: "")
+            item.image = EditorIcon.effects.image(size: 16)
             item.target = self; item.representedObject = kind.rawValue; item.isEnabled = paintDocument.state.layers.count < 32
             menu.addItem(item)
         }
@@ -724,8 +755,12 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         status.stringValue = mask ? "Editing layer mask · black hides · white reveals · X swaps colors." : canvas.tool.help
         window?.makeFirstResponder(canvas)
     }
+    @objc func toggleQuickMask() {
+        canvas.toggleQuickMask()
+        window?.makeFirstResponder(canvas)
+    }
     private func synchronizeMaskColors() {
-        let editingMask = paintDocument.state.isEditingMask
+        let editingMask = paintDocument.state.isEditingCoverage
         guard editingMask != editingMaskColors else { return }
         if editingMask {
             pixelColors = (canvas.color, canvas.alternateColor)
@@ -759,7 +794,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     @objc private func colorChanged(_ sender: NSColorWell) { setColor(PixelColor(sender.color), alternate: sender === alternateColorWell) }
     @objc private func swatchClicked(_ sender: SwatchButton) { setColor(sender.color) }
     func setColor(_ color: PixelColor, alternate: Bool = false) {
-        let color = paintDocument.state.isEditingMask ? color.maskColor : color
+        let color = paintDocument.state.isEditingCoverage ? color.maskColor : color
         if alternate {
             canvas.alternateColor = color; alternateColorWell.color = color.nsColor; alternateHexField.stringValue = color.hex
         } else {
@@ -806,6 +841,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let menu = NSMenu(title: single ? layer.name : "Selected Layers"); menu.autoenablesItems = false
         func bind(_ item: NSMenuItem) {
             guard let action = item.action else { return }
+            if action == #selector(editLayerContent) { item.image = (layer.text != nil ? EditorIcon.text : .effects).image(size: 16) }
+            if action == #selector(contextEditingTarget) { item.image = (state.isEditingMask ? EditorIcon.layers : .mask).image(size: 16) }
+            if item.image == nil { item.image = EditorIcon.forAction(action) }
             item.representedObject = LayerMenuInvocation(action: action, value: item.representedObject, state: state, selectedIDs: selected)
             item.target = self; item.action = #selector(performLayerMenuAction(_:))
         }
@@ -848,6 +886,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             let path = (state.ancestors(of: group.id).reversed().compactMap { id in state.layers.first { $0.id == id }?.name } + [group.name]).joined(separator: " / ")
             destination(path, parent: group.id)
         }
+        move.image = EditorIcon.group.image(size: 16)
         move.submenu = destinations; move.isEnabled = destinations.items.contains { $0.isEnabled }; menu.addItem(move)
         if single {
             command("Move Up", #selector(layerUp), enabled: state.canReorderActive(by: 1))
@@ -855,6 +894,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
             menu.addItem(.separator())
             command(layer.isClipped ? "Release Clipping Mask" : "Create Clipping Mask", #selector(toggleClipping), enabled: state.canClipActive)
             let mask = NSMenuItem(title: "Layer Mask", action: nil, keyEquivalent: "")
+            mask.image = EditorIcon.mask.image(size: 16)
             mask.submenu = LayerMaskCommand.menu(target: self, action: #selector(maskCommand(_:)), state: state)
             mask.submenu?.autoenablesItems = false
             mask.submenu?.items.forEach(bind)
@@ -1086,11 +1126,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private func updateStructureMenu() {
         let state = paintDocument.state
         let menu = NSMenu(); menu.autoenablesItems = false
-        menu.addItem(withTitle: "Layers", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Layers", action: nil, keyEquivalent: "").image = EditorIcon.layers.image(size: 16)
         func command(_ title: String, _ action: Selector, enabled: Bool = true) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; item.isEnabled = enabled; menu.addItem(item)
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; item.isEnabled = enabled; item.image = EditorIcon.forAction(action); menu.addItem(item)
         }
-        let effect = NSMenuItem(title: "New Effect Layer", action: nil, keyEquivalent: ""); effect.submenu = effectMenu(); menu.addItem(effect)
+        let effect = NSMenuItem(title: "New Effect Layer", action: nil, keyEquivalent: ""); effect.submenu = effectMenu(); effect.image = EditorIcon.effects.image(size: 16); menu.addItem(effect)
         command(state.activeLayer.isLocked ? "Unlock Layer" : "Lock Layer", #selector(toggleLayerLock), enabled: !state.ancestors(of: state.activeID).contains(where: state.isEffectivelyLocked))
         command("Edit Text / Effect…", #selector(editLayerContent), enabled: !state.isEffectivelyLocked(state.activeID) && (state.activeLayer.text != nil || state.activeLayer.effect != nil))
         command("Rasterize Text Layer", #selector(rasterizeTextLayer), enabled: !state.isEffectivelyLocked(state.activeID) && state.activeLayer.text != nil)
@@ -1131,6 +1171,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
                 state.layers[i].mask = state.layers[i].mask?.translated(dx: -Int(rect.minX), dy: -Int(rect.minY), width: state.layers[i].raster.width, height: state.layers[i].raster.height)
             }
             state.width = state.layers[0].raster.width; state.height = state.layers[0].raster.height
+            state.quickMask = state.quickMask?.translated(dx: -Int(rect.minX), dy: -Int(rect.minY), width: state.width, height: state.height)
             state.selection = nil
         }
         canvas.selection = nil; canvas.zoomToFit()
@@ -1163,7 +1204,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     }
     func applyAdjustment(_ filter: String, name: String) {
         canvas.finishText()
-        guard paintDocument.state.activeEffectivelyVisible, paintDocument.state.canPaintTarget else { return }
+        guard paintDocument.state.editingTargetVisible, paintDocument.state.canPaintTarget else { return }
         let original = paintDocument.state.editingRaster
         let image = original.ciImage.applyingFilter(filter)
         let output = paintDocument.renderer.cgImage(image, format: original.format)
@@ -1176,10 +1217,10 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.finishText()
         guard canvas.selection?.isEmpty != true else { return }
         let state = paintDocument.state
-        guard state.isEditingMask || state.activeLayer.effect == nil else { NSSound.beep(); return }
-        guard !cut || (state.canPaintTarget && state.activeEffectivelyVisible) else { NSSound.beep(); return }
+        guard state.isEditingCoverage || state.activeLayer.effect == nil else { NSSound.beep(); return }
+        guard !cut || (state.canPaintTarget && state.editingTargetVisible) else { NSSound.beep(); return }
         let source: Raster
-        if state.isEditingMask { source = state.editingRaster }
+        if state.isEditingCoverage { source = state.editingRaster }
         else if state.activeLayer.isGroup {
             guard let image = try? Raster(image: paintDocument.renderer.contentImage(of: state.activeID, layers: state.layers, width: state.width, height: state.height)) else { return }
             source = image
@@ -1192,7 +1233,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     }
     func pastePixels() {
         guard let data = NSPasteboard.general.data(forType: .png) ?? NSPasteboard.general.data(forType: .tiff) else { return }
-        do { try importLayer(ProjectCodec.decodeImage(data), name: "Pasted Image") } catch { showError(error) }
+        do {
+            let raster = try ProjectCodec.decodeImage(data)
+            if paintDocument.state.isQuickMask { try paintDocument.pasteQuickMask(raster) }
+            else { try importLayer(raster, name: "Pasted Image") }
+        } catch { showError(error) }
     }
     func importLayer(_ raster: Raster, name: String) throws {
         guard paintDocument.state.layers.count < 32 else { throw PaintError.tooManyLayers }

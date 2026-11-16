@@ -240,14 +240,15 @@ struct Raster: Equatable {
     /// visiting overlapping brush disks, and applies opacity uniformly around the path.
     mutating func strokeShape(in rect: CGRect, ellipse: Bool, size: Double,
                               color: PixelColor, opacity: Double, clip: CGRect?, selection: SelectionMask? = nil,
-                              antialias: Bool = true, fillColor: PixelColor? = nil, hardness: Double = 1) {
+                              antialias: Bool = true, fillColor: PixelColor? = nil, hardness: Double = 1,
+                              alignment: ShapeOutlineAlignment = .center) {
         guard rect.width > 0, rect.height > 0 else { return }
         if BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness < 1 {
             strokeSoftShape(in: rect, ellipse: ellipse, size: size, color: color, opacity: opacity, clip: clip,
-                            selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness)
+                            selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness, alignment: alignment)
             return
         }
-        let radius = max(1, size) / 2 + 2
+        let radius = alignment.expansion(for: size) + 2
         let area = rect.insetBy(dx: -radius, dy: -radius).integral.intersection(clip ?? bounds).intersection(bounds).intersection(selection?.bounds ?? bounds)
         guard !area.isNull, !area.isEmpty else { return }
         let format = format
@@ -261,7 +262,7 @@ struct Raster: Equatable {
             ctx.scaleBy(x: 1, y: -1)
             ctx.clip(to: area)
             ctx.setShouldAntialias(antialias)
-            ctx.setLineWidth(max(1, size))
+            ctx.setLineWidth(max(1, size) * alignment.strokeMultiplier)
             ctx.setLineJoin(.round)
             // Composite fill and outline together so tool opacity is applied once,
             // including where the stroke covers the inside edge of the fill.
@@ -273,13 +274,27 @@ struct Raster: Equatable {
             if let fillColor {
                 ctx.setFillColor(fillColor.nsColor.cgColor)
             }
-            if ellipse { ctx.addEllipse(in: rect) } else { ctx.addRect(rect) }
-            if fillColor != nil {
-                ctx.drawPath(using: .fillStroke)
-                ctx.endTransparencyLayer()
+            let path = ellipse ? CGPath(ellipseIn: rect, transform: nil) : CGPath(rect: rect, transform: nil)
+            let outline = ShapeOutlineAlignment.strokePath(path, rect: rect, ellipse: ellipse, width: max(1, size) * alignment.strokeMultiplier)
+            if alignment == .center {
+                if outline === path {
+                    ctx.addPath(path)
+                    ctx.drawPath(using: fillColor == nil ? .stroke : .fillStroke)
+                } else {
+                    if fillColor != nil { ctx.addPath(path); ctx.fillPath() }
+                    ctx.addPath(outline); ctx.strokePath()
+                }
             } else {
-                ctx.strokePath()
+                if fillColor != nil { ctx.addPath(path); ctx.fillPath() }
+                ctx.saveGState()
+                alignment.clipOutline(in: ctx, path: path, region: area, antialias: antialias)
+                if alignment == .inside && max(1, size) * 2 >= min(rect.width, rect.height) {
+                    ctx.setFillColor(color.nsColor.withAlphaComponent(Double(color.a) / 255 * (fillColor == nil ? opacity : 1)).cgColor)
+                    ctx.addPath(path); ctx.fillPath()
+                } else { ctx.addPath(outline); ctx.strokePath() }
+                ctx.restoreGState()
             }
+            if fillColor != nil { ctx.endTransparencyLayer() }
         }
     }
 

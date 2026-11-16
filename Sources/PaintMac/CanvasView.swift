@@ -4,6 +4,7 @@ import CoreImage
 enum PaintTool: String, CaseIterable {
     case brush, eraser, selection, ellipseSelect, lasso, move, fill, eyedropper, line, rectangle, ellipse, text, crop, hand
     var isSelection: Bool { self == .selection || self == .ellipseSelect || self == .lasso }
+    var isGeometry: Bool { self == .line || self == .rectangle || self == .ellipse }
     var isPainting: Bool { [.brush, .eraser, .fill, .line, .rectangle, .ellipse, .text].contains(self) }
     var title: String {
         switch self {
@@ -47,7 +48,7 @@ enum PaintTool: String, CaseIterable {
         case .eraser: return "e"
         case .selection: return "s"
         case .ellipseSelect: return "m"
-        case .lasso: return "q"
+        case .lasso: return "a"
         case .move: return "v"
         case .fill: return "f"
         case .eyedropper: return "i"
@@ -63,12 +64,13 @@ enum PaintTool: String, CaseIterable {
         switch self {
         case .brush: return "Drag to paint. [ and ] change brush size."
         case .eraser: return "Drag to erase pixels on the selected layer."
-        case .selection, .ellipseSelect, .lasso: return "Drag to select. ⇧ adds · ⌥ subtracts · ⇧⌥ intersects · Control constrains."
+        case .selection, .ellipseSelect: return "Drag to select. Hold Option during drag for center origin; Control constrains. Before drag: ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
+        case .lasso: return "Drag to select. ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
         case .move: return "Drag to move selected pixels, or the entire active layer."
         case .fill: return "Click to fill a connected area. Adjust tolerance in the inspector."
         case .eyedropper: return "Click to sample a color from the visible image."
-        case .line: return "Drag to draw a line. Hold Shift to snap to 45°."
-        case .rectangle, .ellipse: return "Drag to draw. Filled uses the alternate color inside; right mouse swaps colors. Shift makes equal sides."
+        case .line: return "Drag to draw a line. Option draws from its center; Shift snaps to 45°."
+        case .rectangle, .ellipse: return "Drag to draw. Filled uses the alternate color inside; right mouse swaps colors. Shift makes equal sides; Option draws from the center."
         case .text: return "Drag a text box and type. Click outside or ⌘Return to finish; Escape cancels. Drag its bar to move."
         case .crop: return "Crop every layer to the current selection's bounds."
         case .hand: return "Drag to pan. You can also hold Space with any tool."
@@ -84,6 +86,7 @@ final class CanvasView: NSView, NSEditor {
     var brushOpacity: Double = 1 { didSet { updateTextAppearance() } }
     var smooth = true { didSet { updateTextAppearance() } }
     var fillShapes = false
+    var shapeAlignment: ShapeOutlineAlignment = .center
     var color = PixelColor(r: 64, g: 117, b: 245)
     var alternateColor = PixelColor.white
     var tolerance = 32
@@ -103,6 +106,7 @@ final class CanvasView: NSView, NSEditor {
     private(set) var textEditor: CanvasTextEditor?
     private var textLayerID: UUID?
     private var textEditsMask = false
+    private var textEditsQuickMask = false
     private var draftTextLayer: PaintLayer?
     private var textAddsLayer = false
     private var textReediting = false
@@ -112,10 +116,15 @@ final class CanvasView: NSView, NSEditor {
     var effectPreviewComposite: CGImage? { effectPreviewImage.map { paintDocument.renderer.cgImage($0, format: paintDocument.state.format) } }
     private(set) var textPreviewRaster: Raster?
     private var textPreviewImage: CIImage?
-    var displayedImage: CIImage { textPreviewImage ?? effectPreviewImage ?? paintDocument.compositeImage }
+    var displayedImage: CIImage {
+        let image = textPreviewImage ?? effectPreviewImage ?? paintDocument.compositeImage
+        guard let mask = paintDocument.state.quickMask else { return image }
+        let coverage = textEditsQuickMask ? textPreviewRaster.map { SelectionMask(editingRaster: $0) } ?? mask : mask
+        return QuickMaskOverlay.image(coverage, over: image)
+    }
     /// CPU pixels are requested only for export, sampling, snapshots, or fallback.
     var displayedComposite: CGImage {
-        if let preview = textPreviewImage ?? effectPreviewImage { return paintDocument.renderer.cgImage(preview, format: paintDocument.state.format) }
+        if paintDocument.state.isQuickMask || textPreviewImage != nil || effectPreviewImage != nil { return paintDocument.renderer.cgImage(displayedImage, format: paintDocument.state.format) }
         return paintDocument.composite
     }
     private var textColor = PixelColor.black
@@ -129,6 +138,8 @@ final class CanvasView: NSView, NSEditor {
     private var gestureState: DocumentState?
     private var gestureSelection: SelectionMask?
     private var gestureSelectionMode: SelectionMode = .replace
+    private var selectionOptionStartsCombine = false
+    private var geometryPoint = CGPoint.zero
     private var lassoPoints: [CGPoint] = []
     private var cachedSelectionID: UUID?
     private var selectionOutline: CGPath?
@@ -267,6 +278,14 @@ final class CanvasView: NSView, NSEditor {
         overlays.needsDisplay = true; onSelectionChange?()
     }
 
+    func toggleQuickMask() {
+        guard !gestureActive && !isPanning && cancelledGestureButtons.isEmpty else { return }
+        finishText()
+        paintDocument.edit(paintDocument.state.isQuickMask ? "Exit Quick Mask" : "Enter Quick Mask") { $0.toggleQuickMask() }
+        synchronizeSelection(); needsDisplay = true
+        onStatus?(paintDocument.state.isQuickMask ? "Quick Mask · red is selected · white adds · black removes · Q finishes. Select a region and use Move to reposition mask pixels." : tool.help)
+    }
+
     func changeSelection(_ mask: SelectionMask?, name: String) {
         paintDocument.edit(name) { $0.selection = mask }
         synchronizeSelection()
@@ -335,7 +354,7 @@ final class CanvasView: NSView, NSEditor {
             let box = CGRect(origin: toView(textBoxPreview.origin), size: CGSize(width: textBoxPreview.width * zoom, height: textBoxPreview.height * zoom))
             NSColor.controlAccentColor.setStroke(); let path = NSBezierPath(rect: box); path.lineWidth = 1; path.stroke()
         }
-        if let pointer, (tool == .brush || tool == .eraser), !spaceDown, imageRect.contains(pointer) {
+        if let pointer, (tool == .brush || tool == .eraser), !spaceDown, bounds.contains(pointer) {
             let diameter = max(3, brushSize * zoom)
             let circle = NSBezierPath(ovalIn: CGRect(x: pointer.x - diameter / 2, y: pointer.y - diameter / 2,
                                                     width: diameter, height: diameter))
@@ -386,44 +405,49 @@ final class CanvasView: NSView, NSEditor {
         let alternate = gestureButton == 1
         gestureColor = alternate ? alternateColor : color
         gestureFillColor = fillShapes ? (alternate ? color : alternateColor) : nil
-        if paintDocument.state.isEditingMask {
+        if paintDocument.state.isEditingCoverage {
             gestureColor = gestureColor.maskColor
             gestureFillColor = gestureFillColor?.maskColor
         }
         if shouldPan {
             isPanning = true; panStart = pan; gestureStart = viewPoint; NSCursor.closedHand.push(); return
         }
-        guard imageRect.contains(viewPoint) else { return }
+        // Keep the actual off-image anchor. Raster and mask operations clip at
+        // image bounds, allowing shapes/selections/strokes to cross an edge.
+        let samplesColor = tool == .eyedropper || (!tool.isSelection && !tool.isGeometry && event.modifierFlags.contains(.option))
+        if (tool == .fill || samplesColor), !imageRect.contains(viewPoint) { return }
         gestureActive = true
         let point = toImage(viewPoint)
         gestureStart = point; lastPoint = point; gestureSelection = selection; gestureTravel = 0
+        geometryPoint = point
         if tool.isSelection {
             gestureState = paintDocument.state
             gestureSelectionMode = SelectionMode.resolve(event.modifierFlags, fallback: selectionMode)
+            selectionOptionStartsCombine = event.modifierFlags.contains(.option)
             lassoPoints = [point]
             return
         }
-        if tool == .eyedropper || event.modifierFlags.contains(.option) {
-            if let raster = paintDocument.state.isEditingMask ? paintDocument.state.editingRaster : try? Raster(image: paintDocument.composite) {
+        if samplesColor {
+            if let raster = paintDocument.state.isEditingCoverage ? paintDocument.state.editingRaster : try? Raster(image: paintDocument.composite) {
                 onColorPick?(raster.pixel(x: Int(point.x), y: Int(point.y)), alternate)
             }
             gestureActive = false
             return
         }
-        guard !paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID),
-              tool != .move || paintDocument.state.isEditingMask || paintDocument.state.canModifySubtree(paintDocument.state.activeID) else {
+        guard paintDocument.state.isQuickMask || (!paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID) &&
+              (tool != .move || paintDocument.state.isEditingMask || paintDocument.state.canModifySubtree(paintDocument.state.activeID))) else {
             gestureActive = false; onStatus?("Unlock the layer or group before editing it."); NSSound.beep(); return
         }
-        guard paintDocument.state.activeEffectivelyVisible else {
+        guard paintDocument.state.editingTargetVisible else {
             gestureActive = false
             onStatus?("Show the selected layer before editing it."); NSSound.beep(); return
         }
-        if !paintDocument.state.isEditingMask, let text = paintDocument.state.activeLayer.text,
+        if !paintDocument.state.isEditingCoverage, let text = paintDocument.state.activeLayer.text,
            text.rect.contains(point), (tool == .text || event.clickCount == 2) {
             gestureActive = false; editTextLayer(); return
         }
         let before = paintDocument.state
-        if before.activeLayer.isGroup, !before.isEditingMask, [.brush, .fill, .line, .rectangle, .ellipse].contains(tool) {
+        if before.activeLayer.isGroup, !before.isEditingCoverage, [.brush, .fill, .line, .rectangle, .ellipse].contains(tool) {
             guard before.layers.count < 32 else {
                 gestureActive = false; onStatus?("The layer limit is 32. Select an existing image layer to paint."); NSSound.beep(); return
             }
@@ -463,13 +487,15 @@ final class CanvasView: NSView, NSEditor {
             layoutTextEditor(); needsDisplay = true; return
         }
         guard gestureActive else { return }
-        var point = toImage(viewPoint)
+        let point = toImage(viewPoint)
+        geometryPoint = point
+        if !event.modifierFlags.contains(.option) { selectionOptionStartsCombine = false }
         gestureTravel = max(gestureTravel, hypot(point.x - gestureStart.x, point.y - gestureStart.y) * zoom)
         if tool == .text {
             textBoxPreview = dragRect(to: point, square: false); needsDisplay = true; return
         }
         if tool.isSelection {
-            updateSelection(to: point, constrain: event.modifierFlags.contains(.control))
+            updateSelection(to: point, modifiers: event.modifierFlags)
             return
         }
         guard let before = gestureState else { return }
@@ -482,32 +508,47 @@ final class CanvasView: NSView, NSEditor {
             if let gestureSelection { selection = gestureSelection.translated(dx: dx, dy: dy) }
             paintDocument.invalidate()
         case .line, .rectangle, .ellipse:
-            paintDocument.state.editingRaster = gestureRaster ?? before.editingRaster
-            if tool == .line {
-                if event.modifierFlags.contains(.shift) {
-                    let angle = (atan2(point.y - gestureStart.y, point.x - gestureStart.x) / (.pi / 4)).rounded() * (.pi / 4)
-                    let length = hypot(point.x - gestureStart.x, point.y - gestureStart.y)
-                    if smooth {
-                        point = CGPoint(x: gestureStart.x + cos(angle) * length, y: gestureStart.y + sin(angle) * length)
-                    } else {
-                        let diagonal = abs(cos(angle)) > 0.5 && abs(sin(angle)) > 0.5
-                        let step = (diagonal ? length / sqrt(2) : length).rounded()
-                        point = CGPoint(x: floor(gestureStart.x) + 0.5 + cos(angle).rounded() * step,
-                                        y: floor(gestureStart.y) + 0.5 + sin(angle).rounded() * step)
-                    }
-                }
-                paint(from: gestureStart, to: point)
-            } else {
-                let rect = dragRect(to: point, square: event.modifierFlags.contains(.shift))
-                let selection = self.selection
-                paintDocument.state.editRaster { $0.strokeShape(
-                    in: rect, ellipse: tool == .ellipse, size: brushSize,
-                    color: gestureColor, opacity: brushOpacity, clip: nil, selection: selection,
-                    antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness) }
-                paintDocument.invalidate()
-            }
+            updateShape(to: point, modifiers: event.modifierFlags)
         default: break
         }
+    }
+
+    private func updateShape(to point: CGPoint, modifiers: NSEvent.ModifierFlags) {
+        guard let before = gestureState else { return }
+        var point = point
+        paintDocument.state.editingRaster = gestureRaster ?? before.editingRaster
+        if tool == .line {
+            if modifiers.contains(.shift) {
+                let angle = (atan2(point.y - gestureStart.y, point.x - gestureStart.x) / (.pi / 4)).rounded() * (.pi / 4)
+                let length = hypot(point.x - gestureStart.x, point.y - gestureStart.y)
+                if smooth {
+                    point = CGPoint(x: gestureStart.x + cos(angle) * length, y: gestureStart.y + sin(angle) * length)
+                } else {
+                    let diagonal = abs(cos(angle)) > 0.5 && abs(sin(angle)) > 0.5
+                    let step = (diagonal ? length / sqrt(2) : length).rounded()
+                    point = CGPoint(x: floor(gestureStart.x) + 0.5 + cos(angle).rounded() * step,
+                                    y: floor(gestureStart.y) + 0.5 + sin(angle).rounded() * step)
+                }
+            }
+            let start = modifiers.contains(.option) ? CGPoint(x: 2 * gestureStart.x - point.x, y: 2 * gestureStart.y - point.y) : gestureStart
+            paint(from: start, to: point)
+        } else {
+            let rect = dragRect(to: point, square: modifiers.contains(.shift), fromCenter: modifiers.contains(.option))
+            let selection = self.selection
+            paintDocument.state.editRaster { $0.strokeShape(
+                in: rect, ellipse: tool == .ellipse, size: brushSize,
+                color: gestureColor, opacity: brushOpacity, clip: nil, selection: selection,
+                antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness, alignment: shapeAlignment) }
+            paintDocument.invalidate()
+        }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        guard gestureActive, !isPanning, cancelledGestureButtons.isEmpty else { super.flagsChanged(with: event); return }
+        if !event.modifierFlags.contains(.option) { selectionOptionStartsCombine = false }
+        if tool == .selection || tool == .ellipseSelect {
+            updateSelection(to: geometryPoint, modifiers: event.modifierFlags)
+        } else if tool.isGeometry, gestureTravel >= 2 { updateShape(to: geometryPoint, modifiers: event.modifierFlags) }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -521,7 +562,7 @@ final class CanvasView: NSView, NSEditor {
         if tool.isSelection, gestureActive {
             if gestureTravel < 2 { selection = nil }
             else {
-                updateSelection(to: toImage(convert(event.locationInWindow, from: nil)), constrain: event.modifierFlags.contains(.control))
+                updateSelection(to: toImage(convert(event.locationInWindow, from: nil)), modifiers: event.modifierFlags)
                 if selection?.isEmpty == true && gestureSelectionMode == .replace { selection = nil }
             }
         }
@@ -587,10 +628,11 @@ final class CanvasView: NSView, NSEditor {
         paintDocument.invalidate()
         needsDisplay = true
     }
-    private func updateSelection(to point: CGPoint, constrain: Bool) {
+    private func updateSelection(to point: CGPoint, modifiers: NSEvent.ModifierFlags) {
         let state = paintDocument.state
         let incoming: SelectionMask
-        let rect = dragRect(to: point, square: constrain).integral
+        let rect = dragRect(to: point, square: modifiers.contains(.control),
+                            fromCenter: modifiers.contains(.option) && !selectionOptionStartsCombine).integral
         switch tool {
         case .selection: incoming = .rectangle(rect, width: state.width, height: state.height)
         case .ellipseSelect: incoming = .ellipse(rect, width: state.width, height: state.height, antialias: smooth)
@@ -606,17 +648,19 @@ final class CanvasView: NSView, NSEditor {
             selection = base.combined(with: incoming, mode: gestureSelectionMode)
         }
     }
-    private func dragRect(to point: CGPoint, square: Bool) -> CGRect {
+    private func dragRect(to point: CGPoint, square: Bool, fromCenter: Bool = false) -> CGRect {
         DragGeometry.rect(from: gestureStart, to: point, square: square,
                           snap: !smooth || tool.isSelection || tool == .text,
-                          centerOnPixel: !smooth && !tool.isSelection && tool != .text && Int(brushSize.rounded()) % 2 == 1)
+                          centerOnPixel: !smooth && !tool.isSelection && tool != .text && shapeAlignment == .center && Int(brushSize.rounded()) % 2 == 1,
+                          fromCenter: fromCenter)
     }
 
     func beginText(in rect: CGRect, color: PixelColor) {
         finishText()
-        guard !paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID), paintDocument.state.activeEffectivelyVisible else { return }
+        guard paintDocument.state.isQuickMask || (!paintDocument.state.isEffectivelyLocked(paintDocument.state.activeID) && paintDocument.state.activeEffectivelyVisible) else { return }
         textReediting = false; textAddsLayer = false; draftTextLayer = nil
-        textEditsMask = paintDocument.state.isEditingMask
+        textEditsQuickMask = paintDocument.state.isQuickMask
+        textEditsMask = paintDocument.state.isEditingCoverage
         textDraftClip = selection
         if textEditsMask { textLayerID = paintDocument.state.activeID }
         else {
@@ -644,7 +688,7 @@ final class CanvasView: NSView, NSEditor {
     }
 
     private func installTextEditor(rect: CGRect, existing: TextLayerContent? = nil) {
-        let editor = CanvasTextEditor(rect: rect, canvasSize: CGSize(width: paintDocument.state.width, height: paintDocument.state.height), allowsOutsideCanvas: existing != nil)
+        let editor = CanvasTextEditor(rect: rect, canvasSize: CGSize(width: paintDocument.state.width, height: paintDocument.state.height), allowsOutsideCanvas: true)
         editor.horizontalScale = existing?.horizontalScale ?? 1
         if let existing { editor.textView.string = existing.string }
         textEditor = editor
@@ -689,7 +733,13 @@ final class CanvasView: NSView, NSEditor {
         guard let editor = textEditor else { return }
         var layers = paintDocument.state.layers
         let raster: Raster
-        if textEditsMask {
+        if textEditsQuickMask {
+            guard let mask = paintDocument.state.quickMask else { return }
+            var pixels = mask.editingRaster
+            pixels.drawText(editor.textView.string, in: editor.imageBounds, font: textStyle.font, color: textColor,
+                            opacity: brushOpacity, antialias: smooth, selection: textDraftClip)
+            raster = pixels
+        } else if textEditsMask {
             guard let index = layers.firstIndex(where: { $0.id == textLayerID }), let mask = layers[index].mask else { return }
             var pixels = mask.editingRaster
             pixels.drawText(editor.textView.string, in: editor.imageBounds, font: textStyle.font, color: textColor,
@@ -713,14 +763,18 @@ final class CanvasView: NSView, NSEditor {
         editor.textView.unmarkText()
         if apply { refreshTextPreview() }
         let content = currentTextContent(), layerID = textLayerID, raster = textPreviewRaster, editsMask = textEditsMask
+        let editsQuickMask = textEditsQuickMask
         let adds = textAddsLayer, reediting = textReediting, draftLayer = draftTextLayer, clip = textDraftClip
-        textEditor = nil; textLayerID = nil; textPreviewRaster = nil; textPreviewImage = nil; draftTextLayer = nil; textDraftClip = nil
+        textEditor = nil; textLayerID = nil; textPreviewRaster = nil; textPreviewImage = nil; textEditsQuickMask = false; draftTextLayer = nil; textDraftClip = nil
         window?.makeFirstResponder(self); editor.removeFromSuperview(); needsDisplay = true
         defer { paintDocument.objectDidEndEditing(self) }
         guard apply, let content, (!content.string.isEmpty || reediting), let raster else { return }
         guard (try? content.validate()) != nil else { onStatus?("Text exceeds supported size limits."); NSSound.beep(); return }
         paintDocument.edit(reediting ? "Edit Text Layer" : "Text") { state in
-            if editsMask {
+            if editsQuickMask {
+                guard state.isQuickMask else { return }
+                state.quickMask = SelectionMask(editingRaster: raster)
+            } else if editsMask {
                 guard let index = state.layers.firstIndex(where: { $0.id == layerID }), state.layers[index].mask != nil else { return }
                 state.layers[index].mask = SelectionMask(editingRaster: raster)
             } else if adds, var layer = draftLayer {
@@ -781,6 +835,7 @@ final class CanvasView: NSView, NSEditor {
             } else { changeSelection(nil, name: "Deselect") }
             return
         }
+        if key == "q", event.modifierFlags.intersection([.command, .control, .option]).isEmpty { toggleQuickMask(); return }
         if key == "x" { onSwapColors?(); return }
         if key == "[" || key == "]" {
             brushSize = max(1, min(300, brushSize + (key == "[" ? -2 : 2))); onSizeChange?(brushSize); needsDisplay = true; return
@@ -796,8 +851,8 @@ final class CanvasView: NSView, NSEditor {
     override func resignFirstResponder() -> Bool { spaceDown = false; return super.resignFirstResponder() }
 
     func deletePixels() {
-        guard paintDocument.state.activeEffectivelyVisible, paintDocument.state.canPaintTarget else { NSSound.beep(); return }
-        paintDocument.edit(paintDocument.state.isEditingMask ? "Clear Mask" : "Delete Pixels") { state in
+        guard paintDocument.state.editingTargetVisible, paintDocument.state.canPaintTarget else { NSSound.beep(); return }
+        paintDocument.edit(paintDocument.state.isQuickMask ? "Clear Quick Mask" : paintDocument.state.isEditingMask ? "Clear Mask" : "Delete Pixels") { state in
             let selection = state.selection
             state.editRaster { $0.erase(selection: selection) }
         }
@@ -807,7 +862,7 @@ final class CanvasView: NSView, NSEditor {
 /// Snap the anchor and a shared side length before rasterization, so equal
 /// geometric lengths cannot round to different pixel widths and heights.
 enum DragGeometry {
-    static func rect(from start: CGPoint, to end: CGPoint, square: Bool, snap: Bool, centerOnPixel: Bool = false) -> CGRect {
+    static func rect(from start: CGPoint, to end: CGPoint, square: Bool, snap: Bool, centerOnPixel: Bool = false, fromCenter: Bool = false) -> CGRect {
         var origin = start
         var dx = end.x - start.x, dy = end.y - start.y
         if snap {
@@ -819,6 +874,7 @@ enum DragGeometry {
             let side = max(abs(dx), abs(dy))
             dx = dx < 0 ? -side : side; dy = dy < 0 ? -side : side
         }
+        if fromCenter { return CGRect(x: origin.x - abs(dx), y: origin.y - abs(dy), width: 2 * abs(dx), height: 2 * abs(dy)) }
         return CGRect(x: min(origin.x, origin.x + dx), y: min(origin.y, origin.y + dy), width: abs(dx), height: abs(dy))
     }
 }

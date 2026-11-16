@@ -18,7 +18,7 @@ extension DocumentState {
     func subtreeIDs(_ id: UUID) -> Set<UUID> {
         Set(layers.filter { $0.id == id || ancestors(of: $0.id).contains(id) }.map(\.id))
     }
-    var canPaintTarget: Bool { !isEffectivelyLocked(activeID) && (activeLayer.isPixelLayer || isEditingMask) }
+    var canPaintTarget: Bool { isQuickMask || (!isEffectivelyLocked(activeID) && (activeLayer.isPixelLayer || isEditingMask)) }
     var activeEffectivelyVisible: Bool {
         activeLayer.visible && ancestors(of: activeID).allSatisfy { id in layers.first { $0.id == id }?.visible == true }
     }
@@ -123,6 +123,10 @@ extension DocumentState {
     }
     /// Move a group and all descendants together; masks follow image pixels.
     mutating func moveActive(from before: DocumentState, dx: Int, dy: Int, selection: SelectionMask?) {
+        if before.isQuickMask {
+            editingRaster = before.editingRaster.moved(dx: dx, dy: dy, selection: selection)
+            return
+        }
         guard !before.isEffectivelyLocked(before.activeID), before.isEditingMask || before.canModifySubtree(before.activeID) else { return }
         if before.isEditingMask {
             editingRaster = before.editingRaster.moved(dx: dx, dy: dy, selection: selection)

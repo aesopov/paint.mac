@@ -7,6 +7,9 @@ bin_path="$(swift build -c "$configuration" --show-bin-path)"
 app_path="$PWD/build/Paint.MAC.app"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$bin_path/PaintMac" "$app_path/Contents/MacOS/PaintMac"
+# SwiftPM executable resources must travel with the standalone app.
+rm -rf "$app_path/Contents/Resources/PaintMac_PaintMac.bundle"
+cp -R "$bin_path/PaintMac_PaintMac.bundle" "$app_path/Contents/Resources/"
 cp scripts/Info.plist "$app_path/Contents/Info.plist"
 swift scripts/make-icon.swift build/AppIcon.iconset
 if [ -d build/AppIcon.iconset ]; then

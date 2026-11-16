@@ -142,13 +142,16 @@ extension Raster {
     /// for wide outlines, and avoids stamping hundreds of overlapping disks.
     mutating func strokeSoftShape(in rect: CGRect, ellipse: Bool, size: Double, color: PixelColor,
                                   opacity: Double, clip: CGRect?, selection: SelectionMask?, antialias: Bool,
-                                  fillColor: PixelColor?, hardness: Double) {
-        let radius = max(0.5, size / 2), profile = BrushProfile(radius: max(0.5, size / 2), hardness: hardness, antialias: antialias)
-        let region = rect.insetBy(dx: -radius - 1, dy: -radius - 1).integral.intersection(bounds)
+                                  fillColor: PixelColor?, hardness: Double, alignment: ShapeOutlineAlignment = .center) {
+        let radius = max(0.5, size / 2) * alignment.strokeMultiplier
+        let profile = BrushProfile(radius: radius, hardness: hardness, antialias: antialias)
+        let expansion = alignment.expansion(for: size) + 1
+        let region = rect.insetBy(dx: -expansion, dy: -expansion).integral.intersection(bounds)
             .intersection(clip ?? bounds).intersection(selection?.bounds ?? bounds).integral.intersection(bounds)
         guard !region.isNull, !region.isEmpty else { return }
         let rw = Int(region.width), rh = Int(region.height)
         let path = ellipse ? CGPath(ellipseIn: rect, transform: nil) : CGPath(rect: rect, transform: nil)
+        let outlinePath = ShapeOutlineAlignment.strokePath(path, rect: rect, ellipse: ellipse, width: radius * 2)
         func mask(fill: Bool) -> Data? {
             var data = Data(count: rw * rh)
             let succeeded = data.withUnsafeMutableBytes { raw -> Bool in
@@ -159,13 +162,18 @@ extension Raster {
                 ctx.setBlendMode(.copy); ctx.setLineJoin(.round)
                 if fill { ctx.setFillColor(gray: 1, alpha: 1); ctx.addPath(path); ctx.fillPath() }
                 else {
+                    alignment.clipOutline(in: ctx, path: path, region: region, antialias: antialias)
                     let softness = radius * (1 - profile.hardness)
                     let steps = min(128, max(8, Int(ceil(softness * 2))))
                     for i in 0..<steps {
                         let t = (Double(i) + 0.5) / Double(steps)
-                        ctx.setLineWidth(2 * (radius - softness * t))
+                        let width = 2 * (radius - softness * t)
+                        ctx.setLineWidth(width)
                         ctx.setStrokeColor(gray: BrushProfile.ramp(t), alpha: 1)
-                        ctx.addPath(path); ctx.strokePath()
+                        if alignment == .inside && width >= min(rect.width, rect.height) {
+                            ctx.setFillColor(gray: BrushProfile.ramp(t), alpha: 1)
+                            ctx.addPath(path); ctx.fillPath()
+                        } else { ctx.addPath(outlinePath); ctx.strokePath() }
                     }
                 }
                 return true
