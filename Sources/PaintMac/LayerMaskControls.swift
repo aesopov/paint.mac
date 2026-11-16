@@ -59,29 +59,26 @@ final class LayerMaskAddButton: NSButton {
 }
 
 final class LayerThumbnailButton: NSButton {
-    private static let previewContext = ImageRenderer().context
     let layerID: UUID
     let editsMask: Bool
-    private let preview: NSImage
+    private var preview = NSImage(size: CGSize(width: 80, height: 64))
+    private let previewRenderer: LayerThumbnailRenderer
+    private(set) var hasPixelPreview = false
     private let selected: Bool
     private let disabledMask: Bool
     private let showsTransparency: Bool
 
-    init(layer: PaintLayer, mask: Bool, selected: Bool, target: AnyObject, action: Selector) {
+    init(layer: PaintLayer, mask: Bool, selected: Bool, target: AnyObject, action: Selector,
+         renderer: LayerThumbnailRenderer = LayerThumbnailRenderer()) {
+        previewRenderer = renderer
         layerID = layer.id; editsMask = mask; self.selected = selected
         disabledMask = mask && !layer.maskEnabled
         showsTransparency = !mask && !layer.isGroup && layer.effect == nil
         if (layer.isGroup || layer.effect != nil) && !mask {
             preview = layer.isGroup ? NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Layer group")! : EditorIcon.effects.image(description: "Effect layer")
-        } else {
-            let raster = mask ? layer.mask!.editingRaster : layer.raster
-            let scale = min(1, min(80 / CGFloat(raster.width), 64 / CGFloat(raster.height)))
-            let size = CGSize(width: max(1, ceil(CGFloat(raster.width) * scale)), height: max(1, ceil(CGFloat(raster.height) * scale)))
-            let pixels = raster.ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let image = Self.previewContext.createCGImage(pixels, from: CGRect(origin: .zero, size: size), format: .RGBA8, colorSpace: RGBProfile.displayP3.space)!
-            preview = NSImage(cgImage: image, size: size)
         }
         super.init(frame: .zero)
+        updatePreview(layer: layer)
         self.target = target; self.action = action; isBordered = false
         let kind = layer.isGroup ? "group" : (layer.effect != nil ? "effect layer" : (layer.text != nil ? "text layer" : "image layer"))
         setAccessibilityLabel(mask ? "Edit mask for \(layer.name)" : "Select \(kind) \(layer.name)")
@@ -92,6 +89,18 @@ final class LayerThumbnailButton: NSButton {
                      : "Edit image pixels. Move moves the image and its mask together.")))
         widthAnchor.constraint(equalToConstant: 44).isActive = true
         heightAnchor.constraint(equalToConstant: 36).isActive = true
+    }
+    func updatePreview(layer: PaintLayer) {
+        guard editsMask || (!layer.isGroup && layer.effect == nil) else { return }
+        let raster = editsMask ? layer.mask!.editingRaster : layer.raster
+        let previous = previewRenderer.request(raster.storage, key: .init(layer: layerID, mask: editsMask)) { [weak self] image in
+            self?.setPreview(image)
+        }
+        if let previous { setPreview(previous) }
+    }
+    private func setPreview(_ image: CGImage) {
+        preview = NSImage(cgImage: image, size: CGSize(width: image.width, height: image.height))
+        hasPixelPreview = true; needsDisplay = true
     }
     required init?(coder: NSCoder) { fatalError() }
     // The table handles pointer clicks and drags; keep native button actions

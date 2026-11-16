@@ -7,7 +7,7 @@ import MetalKit
 /// even when the document is huge or zoomed far beyond the window.
 enum CanvasViewport {
     static func image(_ image: CIImage, imageRect: CGRect, viewSize: CGSize,
-                      drawableSize: CGSize, nearest: Bool) -> CIImage {
+                      drawableSize: CGSize, nearest: Bool, checkerboard: Bool = false) -> CIImage {
         let bounds = CGRect(origin: .zero, size: drawableSize)
         guard viewSize.width > 0, viewSize.height > 0, !image.extent.isEmpty else {
             return CIImage(color: .clear).cropped(to: bounds)
@@ -23,6 +23,17 @@ enum CanvasViewport {
         let positioned = sampled.transformed(by: transform)
         // Write transparent pixels outside the image too: never leave old drawable
         // contents behind after a pan, resize, or transition to a smaller document.
+        if checkerboard {
+            let rect = CGRect(x: imageRect.minX * sx, y: (viewSize.height - imageRect.maxY) * sy,
+                              width: imageRect.width * sx, height: imageRect.height * sy)
+            let checks = CIFilter(name: "CICheckerboardGenerator", parameters: [
+                "inputCenter": CIVector(x: rect.minX, y: rect.maxY),
+                "inputColor0": CIColor(cgColor: NSColor(calibratedWhite: 0.79, alpha: 1).cgColor),
+                "inputColor1": CIColor(cgColor: NSColor(calibratedWhite: 0.91, alpha: 1).cgColor),
+                "inputWidth": 10 * sx, "inputSharpness": 1
+            ])!.outputImage!.cropped(to: rect)
+            return positioned.composited(over: checks.composited(over: CIImage(color: .clear))).cropped(to: bounds)
+        }
         return positioned.composited(over: CIImage(color: .clear)).cropped(to: bounds)
     }
 }
@@ -58,10 +69,14 @@ final class MetalCanvasView: MTKView, MTKViewDelegate {
     let canvasRenderer: MetalCanvasRenderer
     var imageProvider: ((CGSize) -> CIImage)?
     var onFailure: (() -> Void)?
-    private let inFlight = DispatchSemaphore(value: 3)
+    // Keep only one outstanding frame; input can replace the pending viewport
+    // instead of queuing several obsolete zoom positions behind a slow frame.
+    private let inFlight = DispatchSemaphore(value: 1)
+    private let renderQueue = DispatchQueue(label: "Paint.MAC viewport", qos: .userInteractive)
     private var redrawPending = false
     private var redrawScheduled = false
     private(set) var submittedFrameCount = 0
+    private(set) var completedFrameCount = 0
 
     init(renderer: MetalCanvasRenderer) {
         canvasRenderer = renderer
@@ -105,29 +120,38 @@ final class MetalCanvasView: MTKView, MTKViewDelegate {
             inFlight.signal(); return
         }
         let image = imageProvider(CGSize(width: drawable.texture.width, height: drawable.texture.height))
-        do {
-            let task = try canvasRenderer.encode(image, to: drawable.texture, commandBuffer: buffer, colorSpace: RGBProfile.displayP3.space)
-            let semaphore = inFlight
-            buffer.addCompletedHandler { [weak self, image, task] completed in
-                // Keep immutable pixels and the Core Image task alive until the GPU
-                // finishes, even if a newer document snapshot replaces the cache.
-                withExtendedLifetime((image, task)) {}
-                semaphore.signal()
-                let failed = completed.status == .error
-                if failed { NSLog("Paint.MAC Metal canvas: %@", completed.error?.localizedDescription ?? "GPU rendering failed") }
-                RunLoop.main.perform(inModes: [.common]) { [weak self] in
-                    guard let self else { return }
-                    if failed { self.onFailure?() }
-                    else if self.redrawPending { self.redrawPending = false; self.requestRedraw() }
+        submittedFrameCount += 1
+        let canvasRenderer = self.canvasRenderer, semaphore = inFlight
+        renderQueue.async { [weak self] in
+            autoreleasepool {
+                do {
+                    let task = try canvasRenderer.encode(image, to: drawable.texture, commandBuffer: buffer, colorSpace: RGBProfile.displayP3.space)
+                    buffer.addCompletedHandler { [weak self, image, task] completed in
+                        // Keep immutable pixels and the Core Image task alive until the GPU
+                        // finishes, even if a newer document snapshot replaces the cache.
+                        withExtendedLifetime((image, task)) {}
+                        semaphore.signal()
+                        let failed = completed.status == .error
+                        if failed { NSLog("Paint.MAC Metal canvas: %@", completed.error?.localizedDescription ?? "GPU rendering failed") }
+                        RunLoop.main.perform(inModes: [.common]) { [weak self] in
+                            guard let self else { return }
+                            if failed { self.onFailure?() }
+                            else {
+                                self.completedFrameCount += 1
+                                if self.redrawPending { self.redrawPending = false; self.requestRedraw() }
+                            }
+                        }
+                        CFRunLoopWakeUp(CFRunLoopGetMain())
+                    }
+                    buffer.label = "Paint.MAC viewport"
+                    buffer.present(drawable); buffer.commit()
+                } catch {
+                    NSLog("Paint.MAC Metal canvas: %@", error.localizedDescription)
+                    semaphore.signal()
+                    RunLoop.main.perform(inModes: [.common]) { [weak self] in self?.onFailure?() }
+                    CFRunLoopWakeUp(CFRunLoopGetMain())
                 }
-                CFRunLoopWakeUp(CFRunLoopGetMain())
             }
-            buffer.label = "Paint.MAC viewport"
-            buffer.present(drawable); buffer.commit()
-            submittedFrameCount += 1
-        } catch {
-            NSLog("Paint.MAC Metal canvas: %@", error.localizedDescription)
-            inFlight.signal(); onFailure?()
         }
     }
 }

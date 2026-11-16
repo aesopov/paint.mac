@@ -2,7 +2,7 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.18.0 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.18.1 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
 
 Right-click a layer row for rename, duplicate, visibility, lock, grouping/reordering, merge, clipping, and mask actions. Text/effect layers expose their edit actions; groups expose collapse/expand and ungroup. Actions respect locks, clipping stacks, group rules, and layer limits. Right-clicking an unselected row selects it; right-clicking a selected row preserves the multi-selection and offers bulk grouping/movement/deletion. Shift-F10 or the accessibility Show Menu action opens the selected row’s menu.
 
@@ -280,3 +280,9 @@ Press **Q** or click **Quick Mask** at the bottom of the tool rail to edit the s
 Hold **Option** while drawing a rectangle, ellipse, or line to expand from the initial point in both directions; **Shift** still constrains shape proportions/line angles. For rectangle/ellipse marquees, begin dragging and then hold Option for a center origin; **Control** constrains the marquee. Modifiers can be pressed or released during the drag, updating the preview even without moving the pointer. Option held before starting a selection retains Subtract, and Shift+Option retains Intersect.
 
 Rectangle/ellipse **Outline** offers **Inside**, **Center** (the existing default), and **Outside**. The dragged rectangle specifies the outer bound, stroke center, or inner bound respectively. For example, Inside keeps a 10-pixel outline within `(10, 10)…(100, 100)`; Center extends it to `(5, 5)…(105, 105)`. Marquees have no painted thickness and always use their exact boundary. Alignment works with fills, antialiasing, hardness, layer masks, Quick Mask, and high precision RGB. Scroll the options row horizontally if it exceeds the window width.
+
+### Large-image display
+
+The canvas reads immutable pixel tiles through a single lazy Core Image provider. Metal frame preparation runs off the input thread, with one frame in flight and coalesced viewport requests. The checkerboard and artwork present in the same frame during zoom/pan. Layer thumbnails retain their previous preview while a background renderer coalesces updates (up to 15 updates/second); pixel edits reuse existing layer-row controls.
+
+Run the optional 4K rendering benchmark with `PAINTMAC_LARGE_IMAGE_BENCHMARK=1 swift test -c release --filter LargeImagePerformanceTests`. Set `PAINTMAC_BENCHMARK_IMAGE` to a local image path to benchmark an actual file. Timings include GPU completion; the fixture does not change the input file.

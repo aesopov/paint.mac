@@ -125,6 +125,9 @@ final class GroupPaintingTests: XCTestCase {
         func snapshot(_ raster: Raster) throws -> Raster {
             let layer = PaintLayer(name: "Preview", raster: raster)
             let button = LayerThumbnailButton(layer: layer, mask: false, selected: false, target: self, action: #selector(NSObject.description))
+            let deadline = Date(timeIntervalSinceNow: 3)
+            while !button.hasPixelPreview && Date() < deadline { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+            XCTAssertTrue(button.hasPixelPreview)
             button.frame = NSRect(x: 0, y: 0, width: 44, height: 36)
             let window = NSWindow(contentRect: button.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false; window.contentView = button; defer { window.close() }

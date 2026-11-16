@@ -225,7 +225,7 @@ final class CanvasView: NSView, NSEditor {
             view.imageProvider = { [weak self] size in
                 guard let self else { return CIImage.empty() }
                 return CanvasViewport.image(self.displayedImage, imageRect: self.imageRect,
-                                            viewSize: self.bounds.size, drawableSize: size, nearest: self.zoom >= 1)
+                                            viewSize: self.bounds.size, drawableSize: size, nearest: self.zoom >= 1, checkerboard: true)
             }
             view.onFailure = { [weak self] in self?.disableMetal() }
             metalView = view; addSubview(view)
@@ -337,6 +337,10 @@ final class CanvasView: NSView, NSEditor {
         defer { ctx.restoreGState() }
         ctx.clip(to: bounds)
         NSColor.underPageBackgroundColor.setFill(); bounds.fill()
+        // The live Metal frame includes the checkerboard and artwork together.
+        // Drawing checks here would expose the new viewport beneath an older GPU
+        // frame while a zoom/pan is still rendering.
+        if !snapshotRendering, metalView != nil, NSGraphicsContext.current?.isDrawingToScreen == true { return }
         let rect = imageRect
         ctx.saveGState()
         ctx.setShadow(offset: CGSize(width: 0, height: 6), blur: 22, color: NSColor.black.withAlphaComponent(0.45).cgColor)

@@ -18,6 +18,10 @@ final class SelectionAnimationTests: XCTestCase {
         let canvas = CanvasView(document: doc, useMetal: useMetal)
         let window = NSWindow(contentRect: CGRect(x: 200, y: 200, width: 300, height: 240),
                               styleMask: [.titled, .miniaturizable], backing: .buffered, defer: false)
+        // A background XCTest process cannot reliably put a normal window
+        // above the active desktop app. Keep this visibility-dependent fixture
+        // above normal editor windows; production occlusion behavior is unchanged.
+        window.level = .floating
         window.isReleasedWhenClosed = false; window.contentView = canvas
         window.orderFrontRegardless(); canvas.layoutSubtreeIfNeeded(); canvas.setZoom(1)
         run(for: 0.2)

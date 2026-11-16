@@ -108,9 +108,12 @@ final class MetalCanvasTests: XCTestCase {
                 // below 100% is observable rather than coincidentally aligned.
                 canvas.setZoom(zoom, anchor: CGPoint(x: 10, y: 6))
                 try draw(provider(CGSize(width: target.width, height: target.height)), renderer: renderer, into: target)
-                let raster = pixels(target)
-                let mixed = stride(from: 0, to: raster.bytes.count, by: 4).contains {
-                    raster.bytes[$0] > 1 && raster.bytes[$0 + 2] > 1
+                let bytes = pixels(target).bytes
+                let mixed = stride(from: 0, to: bytes.count, by: 4).contains { index in
+                    // Detect color mixing at the red/blue seam, excluding gray
+                    // checks and their antialiased outer boundary.
+                    let red = Int(bytes[index]), green = Int(bytes[index + 1]), blue = Int(bytes[index + 2])
+                    return red > green + 1 && blue > green + 1
                 }
                 XCTAssertEqual(mixed, zoom < 1, "Zoom \(zoom), backing scale \(scale)")
             }

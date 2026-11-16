@@ -56,11 +56,11 @@ final class EditorRegressionTests: XCTestCase {
         }
     }
 
-    private func makeCanvas() -> (PaintDocument, CanvasView, NSWindow) {
+    private func makeCanvas(useMetal: Bool = true) -> (PaintDocument, CanvasView, NSWindow) {
         _ = NSApplication.shared
         let document = PaintDocument()
         document.state = DocumentState(width: 100, height: 100)
-        let canvas = CanvasView(document: document)
+        let canvas = CanvasView(document: document, useMetal: useMetal)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -201,7 +201,9 @@ final class EditorRegressionTests: XCTestCase {
     }
 
     func testZoomedCanvasClipsDrawingAtItsViewport() {
-        let (_, canvas, window) = makeCanvas()
+        // This exercises Quartz clipping into a bitmap; a live Metal drawable
+        // is verified separately by the GPU viewport/presentation tests.
+        let (_, canvas, window) = makeCanvas(useMetal: false)
         defer { window.close() }
         let parent = NSView(frame: CGRect(x: 0, y: 0, width: 200, height: 200))
         window.contentView = parent

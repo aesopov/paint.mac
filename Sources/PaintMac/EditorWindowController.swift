@@ -114,6 +114,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let dimensions = label("1200 × 800 px", size: 11, color: .secondaryLabelColor)
     private let zoomButton = NSButton(title: "100%", target: nil, action: nil)
     private var lastLayers: [String] = []
+    let thumbnailRenderer = LayerThumbnailRenderer()
     private var refreshing = false
     private var effectDialog: EffectLayerDialog?
     private var brushOptions: NSStackView!
@@ -552,11 +553,18 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         if updateRows {
             if signature != lastLayers {
                 lastLayers = signature
+                thumbnailRenderer.retainLayers(Set(state.layers.map(\.id)))
                 layerTable.reloadData()
             } else {
-                // Update only the active thumbnail during a brush gesture.
-                if let row = displayedLayerIDs.firstIndex(of: state.activeID) {
-                    layerTable.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integer: 0))
+                // Pixel edits reuse native row controls and cached previews.
+                // The renderer coalesces versions and never blocks mouse input.
+                if let row = displayedLayerIDs.firstIndex(of: state.activeID),
+                   let cell = layerTable.view(atColumn: 0, row: row, makeIfNecessary: false) {
+                    func update(_ view: NSView) {
+                        (view as? LayerThumbnailButton)?.updatePreview(layer: state.activeLayer)
+                        view.subviews.forEach(update)
+                    }
+                    update(cell)
                 }
             }
         }
@@ -1073,7 +1081,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         eye.contentTintColor = layer.visible ? .secondaryLabelColor : .tertiaryLabelColor
         let active = layer.id == state.activeID
         let image = LayerThumbnailButton(layer: layer, mask: false, selected: active && !state.isEditingMask,
-                                         target: self, action: #selector(thumbnailClicked(_:)))
+                                         target: self, action: #selector(thumbnailClicked(_:)), renderer: thumbnailRenderer)
         let name = label(layer.name, size: 12, weight: .medium)
         let unit = state.clippingUnits(parent: layer.parentID).first { $0.first == layer.id }
         if (unit?.count ?? 0) > 1 {
@@ -1114,7 +1122,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         elements.append(image)
         if layer.mask != nil {
             elements.append(LayerThumbnailButton(layer: layer, mask: true, selected: active && state.isEditingMask,
-                                                 target: self, action: #selector(thumbnailClicked(_:))))
+                                                 target: self, action: #selector(thumbnailClicked(_:)), renderer: thumbnailRenderer))
         }
         elements.append(text)
         let locked = state.isEffectivelyLocked(layer.id)

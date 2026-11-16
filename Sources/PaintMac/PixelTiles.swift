@@ -175,39 +175,26 @@ struct TileGrid: Equatable {
             if a.tileData(key) != b.tileData(key) { return false }
         }; return true
     }
-    /// Nonoverlapping source images are assembled on the document pixel grid.
-    /// The intermediate prevents fractional viewport filtering at tile edges.
+    /// One immutable, lazily supplied source. Core Image requests only the
+    /// needed regions, without a source-over node/intermediate for every tile.
     var ciImage: CIImage {
-        func component(_ c: Int) -> Double {
-            channels == 8 ? Double(UInt16(base[c * 2]) | UInt16(base[c * 2 + 1]) << 8) / 65535 : Double(base[c]) / 255
-        }
-        let alpha = component(channels == 1 ? 0 : 3)
-        let color: CIColor
-        if channels == 1 { color = CIColor(red: 1, green: 1, blue: 1, alpha: alpha) }
-        else {
-            let components = (0..<3).map { alpha > 0 ? component($0) / alpha : 0 } + [alpha]
-            color = CIColor(cgColor: CGColor(colorSpace: profile.space, components: components.map { CGFloat($0) })!)
-        }
-        let solid = CIImage(color: color)
-        guard !tiles.isEmpty else { return solid.cropped(to: bounds) }
-        var result = CIImage(color: .clear).cropped(to: bounds)
-        for ty in 0..<rows {
-            let changed = tiles.keys.filter { $0 / columns == ty }.map { $0 % columns }.sorted()
-            var next = 0
-            for tx in changed + [columns] {
-                if tx > next {
-                    let rect = CGRect(x: next * tileSide, y: height - (ty + 1) * tileSide,
-                                      width: (tx - next) * tileSide, height: tileSide).intersection(bounds)
-                    result = solid.cropped(to: rect).composited(over: result)
-                }
-                if tx < columns, let tile = tiles[ty * columns + tx] {
-                    let image = CIImage(cgImage: tile.image(in: profile)).transformed(by: CGAffineTransform(translationX: CGFloat(tx * tileSide), y: CGFloat(height - (ty + 1) * tileSide))).cropped(to: bounds)
-                    result = image.composited(over: result)
-                }
-                next = tx + 1
+        if tiles.isEmpty {
+            func component(_ c: Int) -> CGFloat {
+                channels == 8 ? CGFloat(UInt16(base[c * 2]) | UInt16(base[c * 2 + 1]) << 8) / 65535 : CGFloat(base[c]) / 255
             }
+            let alpha = component(channels == 1 ? 0 : 3)
+            let color: CIColor
+            if channels == 1 { color = CIColor(red: 1, green: 1, blue: 1, alpha: alpha) }
+            else {
+                let values = (0..<3).map { alpha > 0 ? component($0) / alpha : 0 } + [alpha]
+                color = CIColor(cgColor: CGColor(colorSpace: profile.space, components: values)!)
+            }
+            return CIImage(color: color).cropped(to: bounds)
         }
-        return result.insertingIntermediate()
+        return CIImage(imageProvider: TileImageProvider(self), size: width, height,
+                format: channels == 8 ? .RGBA16 : .RGBA8,
+                colorSpace: channels == 1 ? Raster.colorSpace : profile.space,
+                options: [.providerTileSize: Self.side])
     }
     var nonzeroBounds: CGRect {
         var result = CGRect.null
@@ -226,5 +213,43 @@ struct TileGrid: Equatable {
             if x1 >= 0 { result = result.union(CGRect(x: tx * tileSide + x0, y: ty * tileSide + y0, width: x1 - x0 + 1, height: y1 - y0 + 1)) }
         } }
         return result
+    }
+}
+
+/// Core Image's provider requests top-left rows, matching document storage.
+/// All state is immutable; concurrent render callbacks retain their own snapshot.
+final class TileImageProvider: NSObject {
+    let grid: TileGrid
+    init(_ grid: TileGrid) { self.grid = grid }
+
+    override func provideImageData(_ output: UnsafeMutableRawPointer, bytesPerRow: Int,
+                                   origin originX: Int, _ originY: Int, size width: Int, _ height: Int, userInfo: Any?) {
+        let channels = grid.channels, stride = channels == 1 ? 4 : channels
+        for row in 0..<height {
+            let y = originY + row, destination = output + row * bytesPerRow
+            memset(destination, 0, width * stride)
+            guard y >= 0, y < grid.height else { continue }
+            var x = max(0, originX)
+            let end = min(grid.width, originX + width)
+            while x < end {
+                let tx = x / grid.tileSide, count = min(end, (tx + 1) * grid.tileSide) - x
+                let target = destination + (x - originX) * stride
+                if let tile = grid.tiles[y / grid.tileSide * grid.columns + tx] {
+                    tile.data.withUnsafeBytes { source in
+                        let start = ((y % grid.tileSide) * grid.tileSide + x % grid.tileSide) * channels
+                        if channels != 1 { memcpy(target, source.baseAddress! + start, count * channels) }
+                        else {
+                            let p = target.assumingMemoryBound(to: UInt8.self)
+                            let s = source.bindMemory(to: UInt8.self)
+                            for i in 0..<count { for c in 0..<4 { p[i * 4 + c] = s[start + i] } }
+                        }
+                    }
+                } else {
+                    let p = target.assumingMemoryBound(to: UInt8.self)
+                    for i in 0..<count { for c in 0..<stride { p[i * stride + c] = grid.base[channels == 1 ? 0 : c] } }
+                }
+                x += count
+            }
+        }
     }
 }
