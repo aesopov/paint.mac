@@ -241,11 +241,17 @@ struct Raster: Equatable {
     mutating func strokeShape(in rect: CGRect, ellipse: Bool, size: Double,
                               color: PixelColor, opacity: Double, clip: CGRect?, selection: SelectionMask? = nil,
                               antialias: Bool = true, fillColor: PixelColor? = nil, hardness: Double = 1,
-                              alignment: ShapeOutlineAlignment = .center) {
+                              alignment: ShapeOutlineAlignment = .center, drawOutline: Bool = true,
+                              corners: RectangleCorners = .square, border: ShapeBorder = .solid) {
         guard rect.width > 0, rect.height > 0 else { return }
-        if BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness < 1 {
-            strokeSoftShape(in: rect, ellipse: ellipse, size: size, color: color, opacity: opacity, clip: clip,
-                            selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness, alignment: alignment)
+        if !drawOutline {
+            guard let fillColor else { return }
+            fillShape(in: rect, ellipse: ellipse, color: fillColor, opacity: opacity, clip: clip, selection: selection, antialias: antialias, corners: corners)
+            return
+        }
+        if BrushProfile(radius: 1, hardness: hardness, antialias: antialias).hardness < 1 || (fillColor != nil && alignment == .inside) {
+            strokeMaskedShape(in: rect, ellipse: ellipse, size: size, color: color, opacity: opacity, clip: clip,
+                            selection: selection, antialias: antialias, fillColor: fillColor, hardness: hardness, alignment: alignment, corners: corners, border: border)
             return
         }
         let radius = alignment.expansion(for: size) + 2
@@ -264,6 +270,7 @@ struct Raster: Equatable {
             ctx.setShouldAntialias(antialias)
             ctx.setLineWidth(max(1, size) * alignment.strokeMultiplier)
             ctx.setLineJoin(.round)
+            border.apply(to: ctx, width: max(1, size) * alignment.strokeMultiplier)
             // Composite fill and outline together so tool opacity is applied once,
             // including where the stroke covers the inside edge of the fill.
             if fillColor != nil {
@@ -274,7 +281,7 @@ struct Raster: Equatable {
             if let fillColor {
                 ctx.setFillColor(fillColor.nsColor.cgColor)
             }
-            let path = ellipse ? CGPath(ellipseIn: rect, transform: nil) : CGPath(rect: rect, transform: nil)
+            let path = ellipse ? CGPath(ellipseIn: rect, transform: nil) : corners.path(in: rect)
             let outline = ShapeOutlineAlignment.strokePath(path, rect: rect, ellipse: ellipse, width: max(1, size) * alignment.strokeMultiplier)
             if alignment == .center {
                 if outline === path {
@@ -288,7 +295,7 @@ struct Raster: Equatable {
                 if fillColor != nil { ctx.addPath(path); ctx.fillPath() }
                 ctx.saveGState()
                 alignment.clipOutline(in: ctx, path: path, region: area, antialias: antialias)
-                if alignment == .inside && max(1, size) * 2 >= min(rect.width, rect.height) {
+                if alignment == .inside && border.style == .solid && max(1, size) * 2 >= min(rect.width, rect.height) {
                     ctx.setFillColor(color.nsColor.withAlphaComponent(Double(color.a) / 255 * (fillColor == nil ? opacity : 1)).cgColor)
                     ctx.addPath(path); ctx.fillPath()
                 } else { ctx.addPath(outline); ctx.strokePath() }
@@ -296,6 +303,37 @@ struct Raster: Equatable {
             }
             if fillColor != nil { ctx.endTransparencyLayer() }
         }
+    }
+
+    private mutating func fillShape(in rect: CGRect, ellipse: Bool, color: PixelColor, opacity: Double,
+                                    clip: CGRect?, selection: SelectionMask?, antialias: Bool, corners: RectangleCorners) {
+        let area = rect.insetBy(dx: -1, dy: -1).integral.intersection(clip ?? bounds).intersection(bounds)
+            .intersection(selection?.bounds ?? bounds)
+        guard !area.isNull, !area.isEmpty else { return }
+        let format = format
+        editPixels(in: area, selection: selection) { raw, region in
+            guard let ctx = CGContext(data: raw.baseAddress, width: Int(region.width), height: Int(region.height),
+                                      bitsPerComponent: format.depth.rawValue, bytesPerRow: Int(region.width) * format.depth.bytesPerPixel,
+                                      space: format.profile.space, bitmapInfo: format.depth.bitmapInfo) else { return }
+            ctx.translateBy(x: -region.minX, y: region.maxY); ctx.scaleBy(x: 1, y: -1)
+            ctx.clip(to: area); ctx.setShouldAntialias(antialias)
+            ctx.setFillColor(color.nsColor.withAlphaComponent(Double(color.a) / 255 * opacity).cgColor)
+            ctx.addPath(ellipse ? CGPath(ellipseIn: rect, transform: nil) : corners.path(in: rect))
+            ctx.fillPath()
+        }
+    }
+
+    mutating func strokeLine(from start: CGPoint, to end: CGPoint, size: Double, color: PixelColor, opacity: Double,
+                             selection: SelectionMask?, antialias: Bool, hardness: Double, border: ShapeBorder) {
+        if border.style == .solid || start == end {
+            stroke(from: start, to: end, size: size, color: color, opacity: opacity, erase: false,
+                   clip: nil, selection: selection, antialias: antialias, hardness: hardness)
+            return
+        }
+        let path = CGMutablePath(); path.move(to: start); path.addLine(to: end)
+        strokeMaskedShape(in: CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y)),
+                          ellipse: false, size: size, color: color, opacity: opacity, clip: nil, selection: selection,
+                          antialias: antialias, fillColor: nil, hardness: hardness, border: border, sourcePath: path)
     }
 
     mutating func floodFill(at point: CGPoint, color: PixelColor, tolerance: Int, clip: CGRect?, selection: SelectionMask? = nil) {

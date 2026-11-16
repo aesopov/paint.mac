@@ -70,7 +70,7 @@ enum PaintTool: String, CaseIterable {
         case .fill: return "Click to fill a connected area. Adjust tolerance in the inspector."
         case .eyedropper: return "Click to sample a color from the visible image."
         case .line: return "Drag to draw a line. Option draws from its center; Shift snaps to 45°."
-        case .rectangle, .ellipse: return "Drag to draw. Filled uses the alternate color inside; right mouse swaps colors. Shift makes equal sides; Option draws from the center."
+        case .rectangle, .ellipse: return "Drag to draw. Choose Outline Only, Outline & Fill, or Fill Only. Filled outlines use the alternate color inside; right mouse swaps colors. Shift makes equal sides; Option draws from the center."
         case .text: return "Drag a text box and type. Click outside or ⌘Return to finish; Escape cancels. Drag its bar to move."
         case .crop: return "Crop every layer to the current selection's bounds."
         case .hand: return "Drag to pan. You can also hold Space with any tool."
@@ -85,8 +85,16 @@ final class CanvasView: NSView, NSEditor {
     var brushHardness: Double = 1
     var brushOpacity: Double = 1 { didSet { updateTextAppearance() } }
     var smooth = true { didSet { updateTextAppearance() } }
-    var fillShapes = false
+    var shapePaintMode: ShapePaintMode = .outline { didSet { onShapePaintModeChange?() } }
+    // Convenience for callers that request the original two shape styles.
+    var fillShapes: Bool {
+        get { shapePaintMode != .outline }
+        set { shapePaintMode = newValue ? .outlineAndFill : .outline }
+    }
+    var onShapePaintModeChange: (() -> Void)?
     var shapeAlignment: ShapeOutlineAlignment = .center
+    var rectangleCorners = RectangleCorners.square { didSet { onShapePaintModeChange?() } }
+    var shapeBorder = ShapeBorder.solid { didSet { onShapePaintModeChange?() } }
     var color = PixelColor(r: 64, g: 117, b: 245)
     var alternateColor = PixelColor.white
     var tolerance = 32
@@ -155,6 +163,9 @@ final class CanvasView: NSView, NSEditor {
     private var cancelledGestureButtons = Set<Int>()
     private var gestureColor = PixelColor.black
     private var gestureFillColor: PixelColor?
+    private var gestureDrawsOutline = true
+    private var gestureCorners = RectangleCorners.square
+    private var gestureBorder = ShapeBorder.solid
     private var spaceDown = false
     private var pointer: CGPoint?
     private var tracking: NSTrackingArea?
@@ -268,6 +279,7 @@ final class CanvasView: NSView, NSEditor {
         guard selection?.id != cachedSelectionID else { return }
         cachedSelectionID = selection?.id
         selectionOutline = selection?.outline()
+        overlays.hasSelectionOutline = selectionOutline.map { !$0.isEmpty } ?? false
         // An image mask uses zero for opaque and 255 for transparent, allowing
         // us to shade excluded pixels over either a Metal or AppKit background.
         selectionImage = selection.flatMap {
@@ -345,7 +357,7 @@ final class CanvasView: NSView, NSEditor {
                 ctx.translateBy(x: rect.minX, y: rect.minY); ctx.scaleBy(x: zoom, y: zoom)
                 ctx.setLineWidth(1 / zoom)
                 ctx.setStrokeColor(NSColor.white.cgColor); ctx.addPath(selectionOutline); ctx.strokePath()
-                ctx.setLineDash(phase: 0, lengths: [4 / zoom, 4 / zoom])
+                ctx.setLineDash(phase: overlays.selectionDashPhase / zoom, lengths: [4 / zoom, 4 / zoom])
                 ctx.setStrokeColor(NSColor.black.cgColor); ctx.addPath(selectionOutline); ctx.strokePath()
                 ctx.restoreGState()
             }
@@ -404,7 +416,13 @@ final class CanvasView: NSView, NSEditor {
         gestureButton = button
         let alternate = gestureButton == 1
         gestureColor = alternate ? alternateColor : color
-        gestureFillColor = fillShapes ? (alternate ? color : alternateColor) : nil
+        gestureDrawsOutline = shapePaintMode.drawsOutline
+        gestureCorners = rectangleCorners; gestureBorder = shapeBorder
+        switch shapePaintMode {
+        case .outline: gestureFillColor = nil
+        case .outlineAndFill: gestureFillColor = alternate ? color : alternateColor
+        case .fill: gestureFillColor = gestureColor
+        }
         if paintDocument.state.isEditingCoverage {
             gestureColor = gestureColor.maskColor
             gestureFillColor = gestureFillColor?.maskColor
@@ -538,7 +556,8 @@ final class CanvasView: NSView, NSEditor {
             paintDocument.state.editRaster { $0.strokeShape(
                 in: rect, ellipse: tool == .ellipse, size: brushSize,
                 color: gestureColor, opacity: brushOpacity, clip: nil, selection: selection,
-                antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness, alignment: shapeAlignment) }
+                antialias: smooth, fillColor: gestureFillColor, hardness: gestureHardness, alignment: shapeAlignment,
+                drawOutline: gestureDrawsOutline, corners: gestureCorners, border: gestureBorder) }
             paintDocument.invalidate()
         }
     }
@@ -597,6 +616,9 @@ final class CanvasView: NSView, NSEditor {
             if softBrushStroke != nil, tool == .brush || tool == .eraser {
                 softBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
                                        opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth, hardness: gestureHardness)
+            } else if tool == .line {
+                raster.strokeLine(from: a, to: b, size: brushSize, color: gestureColor, opacity: brushOpacity,
+                                  selection: selection, antialias: smooth, hardness: gestureHardness, border: gestureBorder)
             } else {
                 raster.stroke(from: a, to: b, size: brushSize, color: gestureColor, opacity: brushOpacity,
                               erase: tool == .eraser, clip: nil, selection: selection, antialias: smooth, hardness: gestureHardness)
@@ -634,7 +656,7 @@ final class CanvasView: NSView, NSEditor {
         let rect = dragRect(to: point, square: modifiers.contains(.control),
                             fromCenter: modifiers.contains(.option) && !selectionOptionStartsCombine).integral
         switch tool {
-        case .selection: incoming = .rectangle(rect, width: state.width, height: state.height)
+        case .selection: incoming = .rectangle(rect, width: state.width, height: state.height, corners: gestureCorners, antialias: smooth)
         case .ellipseSelect: incoming = .ellipse(rect, width: state.width, height: state.height, antialias: smooth)
         case .lasso:
             if let last = lassoPoints.last, hypot(point.x - last.x, point.y - last.y) >= 0.5 { lassoPoints.append(point) }
@@ -651,7 +673,7 @@ final class CanvasView: NSView, NSEditor {
     private func dragRect(to point: CGPoint, square: Bool, fromCenter: Bool = false) -> CGRect {
         DragGeometry.rect(from: gestureStart, to: point, square: square,
                           snap: !smooth || tool.isSelection || tool == .text,
-                          centerOnPixel: !smooth && !tool.isSelection && tool != .text && shapeAlignment == .center && Int(brushSize.rounded()) % 2 == 1,
+                          centerOnPixel: !smooth && !tool.isSelection && tool != .text && (tool == .line || shapePaintMode.drawsOutline) && shapeAlignment == .center && Int(brushSize.rounded()) % 2 == 1,
                           fromCenter: fromCenter)
     }
 

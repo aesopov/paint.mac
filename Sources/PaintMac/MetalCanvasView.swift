@@ -136,8 +136,62 @@ final class MetalCanvasView: MTKView, MTKViewDelegate {
 /// previews independent of GPU presentation without intercepting mouse input.
 final class CanvasOverlayView: NSView {
     weak var canvas: CanvasView?
+    var hasSelectionOutline = false {
+        didSet { updateSelectionAnimation() }
+    }
+    private(set) var selectionDashPhase: CGFloat = 0
+    private var selectionTimer: Timer?
+    private var windowObservers: [NSObjectProtocol] = []
+    var isAnimatingSelection: Bool { selectionTimer != nil }
+
+    deinit {
+        selectionTimer?.invalidate()
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers.removeAll()
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification,
+                         NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                         NSWindow.didExposeNotification] {
+                windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.updateSelectionAnimation()
+                })
+            }
+        }
+        updateSelectionAnimation()
+    }
+    override func viewDidHide() { super.viewDidHide(); updateSelectionAnimation() }
+    override func viewDidUnhide() { super.viewDidUnhide(); updateSelectionAnimation() }
+
+    private func updateSelectionAnimation() {
+        let visible = window.map { $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible) } ?? false
+        guard hasSelectionOutline && visible && !isHiddenOrHasHiddenAncestor else {
+            selectionTimer?.invalidate(); selectionTimer = nil
+            return
+        }
+        guard selectionTimer == nil else { return }
+        // One screen point per tick keeps the ants crisp. Common modes keep
+        // them moving during mouse tracking without rerendering the artwork.
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // Ordering a window out need not change its occlusion flag.
+            self.updateSelectionAnimation()
+            guard self.selectionTimer != nil else { return }
+            self.selectionDashPhase = (self.selectionDashPhase + 1).truncatingRemainder(dividingBy: 8)
+            self.needsDisplay = true
+        }
+        timer.tolerance = 0.016
+        selectionTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func draw(_ dirtyRect: NSRect) { canvas?.drawOverlays() }
+    override func draw(_ dirtyRect: NSRect) {
+        updateSelectionAnimation()
+        canvas?.drawOverlays()
+    }
 }

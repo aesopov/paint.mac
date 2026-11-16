@@ -140,21 +140,27 @@ final class FilledShapeTests: XCTestCase {
         let doc = PaintDocument(); doc.makeWindowControllers(); defer { doc.close() }
         let editor = doc.windowControllers[0] as! EditorWindowController
         let root = editor.window!.contentView!
-        let checkbox = try XCTUnwrap(views(root).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Fill shapes" })
-        XCTAssertFalse(editor.canvas.fillShapes); XCTAssertTrue(checkbox.isHidden)
-        editor.selectTool(.rectangle); XCTAssertFalse(checkbox.isHidden)
-        checkbox.performClick(nil); XCTAssertTrue(editor.canvas.fillShapes)
+        let popup = try XCTUnwrap(views(root).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == "Shape paint style" })
+        XCTAssertFalse(editor.canvas.fillShapes); XCTAssertTrue(popup.isHidden)
+        editor.selectTool(.rectangle); XCTAssertFalse(popup.isHidden)
+        popup.selectItem(withTitle: "Outline & Fill"); _ = app.sendAction(popup.action!, to: popup.target, from: popup)
+        XCTAssertTrue(editor.canvas.fillShapes)
         for theme in [NSAppearance.Name.aqua, .darkAqua] {
             app.appearance = NSAppearance(named: theme)
             editor.window!.setContentSize(CGSize(width: 960, height: 640))
             for tool in [PaintTool.ellipse, .rectangle, .line, .brush, .text, .selection] {
                 editor.selectTool(tool); root.layoutSubtreeIfNeeded()
-                XCTAssertEqual(checkbox.isHidden, tool != .rectangle && tool != .ellipse)
-                XCTAssertTrue(editor.canvas.fillShapes); XCTAssertEqual(checkbox.state, .on)
-                if !checkbox.isHidden { XCTAssertTrue(root.bounds.contains(checkbox.convert(checkbox.bounds, to: root))) }
+                XCTAssertEqual(popup.isHidden, tool != .rectangle && tool != .ellipse)
+                XCTAssertTrue(editor.canvas.fillShapes); XCTAssertEqual(popup.titleOfSelectedItem, "Outline & Fill")
+                if !popup.isHidden {
+                    popup.scrollToVisible(popup.bounds); root.layoutSubtreeIfNeeded()
+                    let clip = try XCTUnwrap(popup.enclosingScrollView?.contentView)
+                    XCTAssertTrue(clip.bounds.contains(popup.convert(popup.bounds, to: clip)))
+                }
             }
         }
-        checkbox.performClick(nil); XCTAssertFalse(editor.canvas.fillShapes)
+        popup.selectItem(withTitle: "Outline Only"); _ = app.sendAction(popup.action!, to: popup.target, from: popup)
+        XCTAssertFalse(editor.canvas.fillShapes)
         XCTAssertFalse(doc.undoManager!.canUndo)
     }
 

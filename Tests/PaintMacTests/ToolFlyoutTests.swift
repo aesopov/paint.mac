@@ -28,7 +28,9 @@ final class ToolFlyoutTests: XCTestCase {
     func testRailHasTwoGroupsAndRemembersTypesAcrossPrimaryClicksAndShortcuts() throws {
         let (doc, editor) = editor(); defer { doc.close() }
         let railButtons = views(editor.window!.contentView!).compactMap { $0 as? ToolButton }
-        XCTAssertEqual(railButtons.count, 10); XCTAssertEqual(railButtons.filter { $0 is ToolGroupButton }.count, 2)
+        XCTAssertEqual(railButtons.filter { $0.accessibilityLabel() != "Quick Mask" }.count, 10)
+        XCTAssertEqual(railButtons.filter { $0.accessibilityLabel() == "Quick Mask" }.count, 1)
+        XCTAssertEqual(railButtons.filter { $0 is ToolGroupButton }.count, 2)
         let shapes = try button(.shapes, editor), selections = try button(.selections, editor)
         XCTAssertEqual(shapes.currentTool, .rectangle); XCTAssertEqual(selections.currentTool, .selection)
         for tool in [PaintTool.line, .ellipse, .rectangle, .lasso, .ellipseSelect, .selection] {

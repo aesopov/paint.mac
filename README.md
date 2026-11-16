@@ -2,7 +2,7 @@
 
 A native macOS raster editor inspired by the direct, approachable workflow of Paint.NET. Written from scratch in Swift, using AppKit for the interface and Metal-backed Core Image for layer compositing and adjustments.
 
-**Status:** working 0.16.1 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
+**Status:** working 0.17.0 prototype. The working name is Paint.MAC; it is an independent project with its own code and file format.
 
 Right-click a layer row for rename, duplicate, visibility, lock, grouping/reordering, merge, clipping, and mask actions. Text/effect layers expose their edit actions; groups expose collapse/expand and ungroup. Actions respect locks, clipping stacks, group rules, and layer limits. Right-clicking an unselected row selects it; right-clicking a selected row preserves the multi-selection and offers bulk grouping/movement/deletion. Shift-F10 or the accessibility Show Menu action opens the selected row’s menu.
 
@@ -50,9 +50,10 @@ PAINTMAC_METAL_BENCHMARK=1 swift test -c release --filter MetalCanvasTests/testR
 - Brush and eraser with adjustable size, opacity, and hardness. Soft strokes keep event overlaps from building dark seams.
 - Main and alternate colors: left/right mouse painting, palette assignment, and color picking. X swaps the colors.
 - Contiguous paint bucket with adjustable tolerance, and a color picker.
-- Lines, rectangles, and ellipses with a shared Sharp/Smooth edge toggle; rectangles and ellipses can also be filled with the opposite color. Brushes, erasing, text, and selection shapes also honor the edge mode.
+- Lines, rectangles, and ellipses with a shared Sharp/Smooth edge toggle. Rectangle/ellipse styles include Outline Only, Outline & Fill, and Fill Only; the rail and flyout icons reflect the style. Brushes, erasing, text, and selection shapes also honor the edge mode.
 - Text tool with inline multiline editing in a movable, resizable canvas box, font family, size, bold, and italic. Text uses the main/alternate color and remains editable as a text layer, with an exact raster preview and explicit rasterization for pixel editing.
 - Rectangle, ellipse, and freehand lasso selections, with replace/add/subtract/intersect modes, disconnected regions, and holes.
+- Animated black-and-white marching ants follow selection boundaries and holes, including Quick Mask's local marquee. Dash size stays constant when zooming. Animation updates only the overlay and pauses for hidden/occluded canvases.
 - Feather Selection (Gaussian radius 0–200 px), Invert Selection, and undo/redo of selection edits.
 - Mask-aware painting, shapes, fill, erasing, adjustments, delete, move, copy, cut, and paste as a layer. Crop trims to the selection's bounding box.
 - Move selected pixels or the complete active layer.
@@ -132,7 +133,7 @@ Select an upper layer and choose **Create Clipping Mask** (Option-Command-G). It
 
 ## Layer masks
 
-Use the **Layer Mask** menu beneath the layer controls, or **Layer → Layer Mask**. Choose **Add Mask — Reveal All**, **Add Mask — Hide All**, or **Mask from Selection**. Creating a mask from a selection keeps its holes and feathering and then deselects, allowing you to refine the mask freely. Each layer supports one grayscale raster mask.
+Use the **Add Layer Mask** icon in the Layers panel: click for **Reveal All**, or **Option-click** for **Hide All** on the active layer or group. Deselect first when you want unrestricted mask painting. The icon is disabled for locked layers/groups or an existing mask. It selects the new mask for editing; if Quick Mask is active, that mode finishes in the same undo step. Use the **Layer Mask** menu beneath the layer controls, or **Layer → Layer Mask**, for the remaining mask actions. Choose **Add Mask — Reveal All**, **Add Mask — Hide All**, or **Mask from Selection**. Creating a mask from a selection keeps its holes and feathering and then deselects, allowing you to refine the mask freely. Each layer supports one grayscale raster mask.
 
 Click the mask thumbnail beside the image thumbnail to edit visibility: **black hides**, **white reveals**, and gray gives partial transparency. A blue border identifies the editing target. The palette switches to grayscale, with true black as the main color and white as the alternate. LMB hides, RMB reveals, and X swaps them. Choose other gray values for partial visibility. Clicking the image thumbnail restores your image-painting colors. Mask editing respects selections, opacity, and Sharp/Smooth and works with brush, eraser, fill, shapes, text, and adjustments. Eraser and Delete hide masked regions without erasing original image pixels.
 
@@ -162,7 +163,11 @@ Text layers support masks, clipping, opacity, visibility, grouping, duplication,
 
 Brush, eraser, fill, destructive adjustments, Cut, and Delete require an image layer or mask. Choose **Layer → Rasterize Text Layer** to convert text to pixels explicitly; this preserves its current raster, masks, opacity, and clipping and supports undo. Applying a text mask is labeled **Apply Mask & Rasterize Text**. Merge operations also bake text. Already rasterized text from older projects remains pixels.
 
-For **Rectangle** and **Ellipse**, enable **Filled** in the tool options to paint the interior. Left-drag uses the main color for the outline and alternate color for the fill; right-drag swaps them. Uncheck Filled for an outline only. Size controls outline thickness, and Opacity applies once to the whole shape. Both colors respect selections, feathering, and mask editing. The option stays selected when switching tools and does not affect lines.
+For **Rectangle** and **Ellipse**, choose **Outline Only**, **Outline & Fill**, or **Fill Only** in the tool options. Outline Only and Fill Only use the main color for left-drag and the alternate color for right-drag. Outline & Fill uses the main outline and alternate fill; right-drag swaps them. Fill Only uses the exact dragged shape boundary and ignores outline thickness, alignment, and hardness; those controls are hidden. Size controls outline thickness in the other modes, and Opacity applies once to the whole shape. Inside outlines partition shared antialiased edge coverage so an opaque border does not acquire a colored fringe from its fill. All styles respect selections, feathering, and mask editing. The style stays selected when switching tools and is reflected by the Shapes rail/flyout icons; lines remain outline strokes.
+
+**Rectangle corners:** Rectangle and Rectangle Select share **Square**, **Round**, **Squircle**, **Bevel**, **Scoop**, and **Notch**. A single **Radius** in image pixels controls all four corners and is clamped to half the shortest side; zero gives square corners. Squircle uses a continuous cubic approximation to a fourth-power corner; Scoop cuts a circular concave corner and Notch cuts a square recess. Sharp/Smooth also controls curved selection edges. Existing selections stay unchanged until a new selection gesture.
+
+**Borders:** rectangles, ellipses, and lines offer **Solid**, **Dotted**, and **Dashed**. Dashed exposes **Dash** length and **Gap**; Dotted exposes Gap, with dot size following stroke width. Inside/Outside clips the patterned stroke to the chosen side of the reference boundary. Values use image pixels and remain stable while zooming. Softness, opacity, colors, and masks still apply. Fill Only hides/ignores border settings. The rail and flyout icons reflect corner shape/radius and painted border style; selection icons reflect corners while selection outlines retain marching ants. Scroll the options row horizontally to reach additional settings in narrow windows. Press Return or leave a numeric field to apply it.
 
 **Hardness** controls brush/eraser falloff and line, rectangle, and ellipse outlines: 100% retains the hard edge, while 0% fades gradually from the center to the edge. Filled interiors keep their alternate color; only the outline softens. The value stays selected when switching tools. Soft brush/eraser strokes blend evenly spaced dabs so crossings have smooth falloffs. Spacing is independent of mouse-event frequency; stationary input adds no paint. Opacity, color alpha, and selection coverage apply once against the raster at the start of the gesture, so crossings cannot exceed tool opacity. Separate strokes can still build opacity. Masks and selections retain their partial coverage.
 

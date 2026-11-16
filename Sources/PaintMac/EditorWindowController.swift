@@ -101,8 +101,9 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let layerOpacityLabel = label("100%", size: 11, color: .secondaryLabelColor)
     private let mergeDownButton = NSButton(title: "Merge Down", target: nil, action: nil)
     private let maskButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let addMaskButton = LayerMaskAddButton()
     private var editingMaskColors = false
-    private let quickMaskButton = NSButton()
+    private let quickMaskButton = ToolButton()
     private var pixelColors: (PixelColor, PixelColor)?
     private var paletteButtons: [SwatchButton] = []
     private let layerCount = label("2", size: 11, color: .tertiaryLabelColor)
@@ -120,7 +121,17 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let shapeAlignmentPopup = NSPopUpButton()
     private var shapeAlignmentOptions: NSStackView!
     private var toolOptionsScroll: ToolOptionsScrollView!
-    private let shapeFill = NSButton(checkboxWithTitle: "Filled", target: nil, action: nil)
+    private let shapeStylePopup = NSPopUpButton()
+    private let cornerStylePopup = NSPopUpButton()
+    private let cornerRadius = NSTextField(string: "16")
+    private var cornerOptions: NSStackView!
+    private var radiusOptions: NSStackView!
+    private let borderStylePopup = NSPopUpButton()
+    private let dashLength = NSTextField(string: "8")
+    private let dashGap = NSTextField(string: "4")
+    private var borderOptions: NSStackView!
+    private var dashLengthOptions: NSStackView!
+    private var dashGapOptions: NSStackView!
     private var textOptions: NSStackView!
     private var opacityOptions: NSStackView!
     private let fontFamily = NSPopUpButton()
@@ -150,6 +161,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         document.onChange = { [weak self] in self?.refresh() }
         document.onHistoryNotice = { [weak self] in self?.status.stringValue = $0 }
         canvas.onToolChange = { [weak self] in self?.selectTool($0) }
+        canvas.onShapePaintModeChange = { [weak self] in self?.updateShapeControls() }
         canvas.onColorPick = { [weak self] color, alternate in self?.setColor(color, alternate: alternate) }
         canvas.onSwapColors = { [weak self] in self?.swapColors() }
         document.finishPendingEdits = { [weak canvas] in canvas?.finishText() }
@@ -209,7 +221,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         }
         quickMaskButton.image = EditorIcon.mask.image()
         quickMaskButton.imagePosition = .imageOnly; quickMaskButton.imageScaling = .scaleProportionallyDown
-        quickMaskButton.setButtonType(.toggle); quickMaskButton.bezelStyle = .texturedRounded
+        quickMaskButton.setButtonType(.toggle); quickMaskButton.isBordered = false
         quickMaskButton.target = self; quickMaskButton.action = #selector(toggleQuickMask)
         quickMaskButton.toolTip = "Quick Mask (Q) · edit the selection as pixels"
         quickMaskButton.setAccessibilityLabel("Quick Mask")
@@ -258,16 +270,39 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         edgeMode.selectedSegment = 0; edgeMode.target = self; edgeMode.action = #selector(edgeModeChanged)
         edgeMode.setAccessibilityLabel("Painting edge mode")
         edgeMode.toolTip = "Smooth enables antialiasing. Sharp disables antialiasing."
-        shapeFill.target = self; shapeFill.action = #selector(shapeFillChanged)
-        shapeFill.setAccessibilityLabel("Fill shapes")
-        shapeFill.toolTip = "Left mouse: main outline, alternate fill. Right mouse: alternate outline, main fill."
+        shapeStylePopup.addItems(withTitles: ShapePaintMode.allCases.map(\.rawValue))
+        shapeStylePopup.target = self; shapeStylePopup.action = #selector(shapeStyleChanged)
+        shapeStylePopup.setAccessibilityLabel("Shape paint style")
+        shapeStylePopup.toolTip = "Outline Only or Fill Only uses the main color. Outline & Fill uses main outline, alternate fill. Right mouse swaps colors."
+        cornerStylePopup.addItems(withTitles: RectangleCornerStyle.allCases.map(\.rawValue))
+        cornerStylePopup.target = self; cornerStylePopup.action = #selector(cornerSettingsChanged)
+        cornerStylePopup.setAccessibilityLabel("Rectangle corner style")
+        cornerStylePopup.toolTip = "Shared by rectangle shapes and rectangle selections. Radius is clamped to half the shortest side."
+        cornerRadius.setAccessibilityLabel("Rectangle corner radius in pixels")
+        dashLength.setAccessibilityLabel("Border dash length in pixels")
+        dashGap.setAccessibilityLabel("Border gap in pixels")
+        for field in [cornerRadius, dashLength, dashGap] {
+            field.widthAnchor.constraint(equalToConstant: 52).isActive = true
+            field.delegate = self; field.target = self; field.action = #selector(geometryValueChanged(_:))
+        }
+        cornerRadius.toolTip = "Corner radius in image pixels (0–4096); clamped to fit the rectangle."
+        dashLength.toolTip = "Dash length in image pixels (0.5–8192)."
+        dashGap.toolTip = "Space between dashes or dots, in image pixels (0–8192)."
+        radiusOptions = stack([label("Radius", size: 11), cornerRadius, label("px", size: 11)], vertical: false, spacing: 5)
+        cornerOptions = stack([label("Corners", size: 11), cornerStylePopup, radiusOptions], vertical: false, spacing: 6)
+        borderStylePopup.addItems(withTitles: ShapeBorderStyle.allCases.map(\.rawValue))
+        borderStylePopup.target = self; borderStylePopup.action = #selector(borderSettingsChanged)
+        borderStylePopup.setAccessibilityLabel("Shape border style")
+        dashLengthOptions = stack([label("Dash", size: 11), dashLength, label("px", size: 11)], vertical: false, spacing: 5)
+        dashGapOptions = stack([label("Gap", size: 11), dashGap, label("px", size: 11)], vertical: false, spacing: 5)
+        borderOptions = stack([label("Border", size: 11), borderStylePopup, dashLengthOptions, dashGapOptions], vertical: false, spacing: 6)
         shapeAlignmentPopup.addItems(withTitles: ShapeOutlineAlignment.allCases.map(\.rawValue))
         shapeAlignmentPopup.selectItem(withTitle: canvas.shapeAlignment.rawValue)
         shapeAlignmentPopup.target = self; shapeAlignmentPopup.action = #selector(shapeAlignmentChanged)
         shapeAlignmentPopup.setAccessibilityLabel("Shape outline alignment")
         shapeAlignmentPopup.toolTip = "Inside: dragged boundary is the outer edge. Center: boundary is the stroke center. Outside: boundary is the inner edge."
         shapeAlignmentOptions = stack([label("Outline", size: 11, color: .secondaryLabelColor), shapeAlignmentPopup], vertical: false, spacing: 6)
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeFill, shapeAlignmentOptions], vertical: false, spacing: 10)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, hardnessOptions, edgeMode, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
         toolOptionsScroll = ToolOptionsScrollView(options: optionStack)
         toolOptionsScroll.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(toolOptionsScroll)
         toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
@@ -379,14 +414,22 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let scroll = LayerScrollView(); scroll.documentView = layerTable; scroll.hasVerticalScroller = true
         scroll.drawsBackground = false; scroll.translatesAutoresizingMaskIntoConstraints = false
         inspector.addSubview(scroll)
+        addMaskButton.image = EditorIcon.mask.image(description: "Add Layer Mask")
+        addMaskButton.target = self; addMaskButton.action = #selector(addLayerMaskFromPanel(_:))
+        addMaskButton.isBordered = false; addMaskButton.contentTintColor = .secondaryLabelColor
+        addMaskButton.toolTip = "Add Layer Mask · click to reveal the entire layer or group; Option-click to hide it."
+        addMaskButton.setAccessibilityLabel("Add Layer Mask")
+        addMaskButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        addMaskButton.heightAnchor.constraint(equalToConstant: 26).isActive = true
         let buttons = [
             iconButton("plus", help: "Add Layer ⇧⌘N", action: #selector(addLayer)),
             iconButton("square.on.square", help: "Duplicate Layer", action: #selector(duplicateLayer)),
+            addMaskButton,
             iconButton("arrow.up", help: "Move Layer Up", action: #selector(layerUp)),
             iconButton("arrow.down", help: "Move Layer Down", action: #selector(layerDown)),
             layerTrash
         ]
-        let layerActions = stack(buttons, vertical: false, spacing: 9)
+        let layerActions = stack(buttons, vertical: false, spacing: 8)
         mergeDownButton.target = self; mergeDownButton.action = #selector(mergeSelected)
         mergeDownButton.bezelStyle = .rounded
         mergeDownButton.image = EditorIcon.merge.image(size: 16)
@@ -479,6 +522,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.needsDisplay = true
         synchronizeMaskColors()
         quickMaskButton.state = paintDocument.state.isQuickMask ? .on : .off
+        quickMaskButton.selected = paintDocument.state.isQuickMask
         canvas.refreshTextPreview()
         for id in paintDocument.state.ancestors(of: paintDocument.state.activeID) {
             if let index = paintDocument.state.layers.firstIndex(where: { $0.id == id }) { paintDocument.state.layers[index].expanded = true }
@@ -512,6 +556,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         layerOpacityLabel.stringValue = "\(Int(layerOpacity.doubleValue.rounded()))%"
         layerCount.stringValue = "\(state.layers.count)"
         updateMergeDownButton()
+        addMaskButton.isEnabled = LayerMaskCommand.revealAll.isEnabled(in: state)
         let maskMenu = LayerMaskCommand.menu(target: self, action: #selector(maskCommand(_:)), state: state)
         maskMenu.autoenablesItems = false
         maskMenu.insertItem(withTitle: state.isEditingMask ? "Editing Layer Mask" : "Layer Mask", action: nil, keyEquivalent: "", at: 0)
@@ -553,8 +598,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         opacityOptions.isHidden = !tool.isPainting
         hardnessOptions.isHidden = ![.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
         edgeMode.isHidden = !(tool.isPainting || tool.isSelection)
-        shapeFill.isHidden = tool != .rectangle && tool != .ellipse
-        shapeAlignmentOptions.isHidden = shapeFill.isHidden
+        updateShapeControls()
         toolOptionsScroll.settingsChanged()
         for (key, button) in toolButtons { button.selected = key == tool }
         for (group, button) in toolGroupButtons {
@@ -574,9 +618,58 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.shapeAlignment = ShapeOutlineAlignment.allCases[shapeAlignmentPopup.indexOfSelectedItem]
         window?.makeFirstResponder(canvas)
     }
-    @objc private func shapeFillChanged() {
-        canvas.fillShapes = shapeFill.state == .on
+    private func updateShapeControls() {
+        let isShape = canvas.tool == .rectangle || canvas.tool == .ellipse
+        shapeStylePopup.isHidden = !isShape
+        shapeStylePopup.selectItem(withTitle: canvas.shapePaintMode.rawValue)
+        shapeAlignmentOptions.isHidden = !isShape || !canvas.shapePaintMode.drawsOutline
+        if isShape {
+            brushOptions.isHidden = !canvas.shapePaintMode.drawsOutline
+            hardnessOptions.isHidden = !canvas.shapePaintMode.drawsOutline
+        }
+        toolGroupButtons[.shapes]?.shapePaintMode = canvas.shapePaintMode
+        for button in toolGroupButtons.values { button.rectangleCorners = canvas.rectangleCorners }
+        toolGroupButtons[.shapes]?.shapeBorder = canvas.shapeBorder
+        cornerOptions.isHidden = canvas.tool != .rectangle && canvas.tool != .selection
+        cornerStylePopup.selectItem(withTitle: canvas.rectangleCorners.style.rawValue)
+        cornerRadius.stringValue = String(format: "%g", canvas.rectangleCorners.radius)
+        radiusOptions.isHidden = canvas.rectangleCorners.style == .square
+        borderOptions.isHidden = !canvas.tool.isGeometry || (canvas.tool != .line && !canvas.shapePaintMode.drawsOutline)
+        borderStylePopup.selectItem(withTitle: canvas.shapeBorder.style.rawValue)
+        dashLength.stringValue = String(format: "%g", canvas.shapeBorder.dashLength)
+        dashGap.stringValue = String(format: "%g", canvas.shapeBorder.gap)
+        dashLengthOptions.isHidden = canvas.shapeBorder.style != .dashed
+        dashGapOptions.isHidden = canvas.shapeBorder.style == .solid
+        toolOptionsScroll.settingsChanged(resetScroll: false)
+    }
+    @objc private func shapeStyleChanged() {
+        canvas.shapePaintMode = ShapePaintMode.allCases[shapeStylePopup.indexOfSelectedItem]
         window?.makeFirstResponder(canvas)
+    }
+    @objc private func cornerSettingsChanged() {
+        canvas.rectangleCorners.style = RectangleCornerStyle.allCases[cornerStylePopup.indexOfSelectedItem]
+        window?.makeFirstResponder(canvas)
+    }
+    @objc private func borderSettingsChanged() {
+        canvas.shapeBorder.style = ShapeBorderStyle.allCases[borderStylePopup.indexOfSelectedItem]
+        window?.makeFirstResponder(canvas)
+    }
+    @objc private func geometryValueChanged(_ sender: NSTextField) {
+        applyGeometryValue(sender)
+        window?.makeFirstResponder(canvas)
+    }
+    private func applyGeometryValue(_ field: NSTextField) {
+        let limits: ClosedRange<Double> = field === cornerRadius ? 0...4096 : field === dashLength ? 0.5...8192 : 0...8192
+        guard let value = Double(field.stringValue), value.isFinite, limits.contains(value) else {
+            NSSound.beep(); updateShapeControls(); return
+        }
+        if field === cornerRadius, canvas.rectangleCorners.radius != value { canvas.rectangleCorners.radius = value }
+        if field === dashLength, canvas.shapeBorder.dashLength != value { canvas.shapeBorder.dashLength = value }
+        if field === dashGap, canvas.shapeBorder.gap != value { canvas.shapeBorder.gap = value }
+    }
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, [cornerRadius, dashLength, dashGap].contains(where: { $0 === field }) else { return }
+        applyGeometryValue(field)
     }
     @objc private func textStyleChanged() {
         guard fontSize.doubleValue.isFinite, (1...1024).contains(fontSize.doubleValue) else {
@@ -587,6 +680,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.focusText()
     }
     func controlTextDidChange(_ notification: Notification) {
+        guard notification.object as? NSTextField === fontSize else { return }
         if fontSize.doubleValue.isFinite, (1...1024).contains(fontSize.doubleValue) {
             var style = canvas.textStyle; style.size = fontSize.doubleValue; canvas.textStyle = style
         }
@@ -685,6 +779,16 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     func applyFeather(radius: Double) {
         guard let mask = canvas.selection, !mask.isEmpty, radius.isFinite, (0...200).contains(radius) else { return }
         canvas.changeSelection(mask.feathered(radius: radius, context: paintDocument.renderer.context), name: "Feather Selection")
+    }
+    @objc private func addLayerMaskFromPanel(_ sender: LayerMaskAddButton) {
+        addLayerMaskFromPanel(hideAll: sender.optionClick)
+    }
+    func addLayerMaskFromPanel(hideAll: Bool) {
+        canvas.finishText()
+        guard LayerMaskCommand.revealAll.isEnabled(in: paintDocument.state) else { return }
+        paintDocument.addLayerMask(hideAll ? .hideAll : .revealAll, finishingQuickMask: true)
+        status.stringValue = "Editing layer mask · black hides · white reveals · X swaps colors."
+        window?.makeFirstResponder(canvas)
     }
     @objc private func maskCommand(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let command = LayerMaskCommand(rawValue: raw) else { return }

@@ -38,10 +38,13 @@ private final class ToolFlyoutPanel: NSPanel {
 private final class ToolVariantButton: NSButton {
     let tool: PaintTool
     let current: Bool
+    let paintMode: ShapePaintMode
+    let corners: RectangleCorners
+    let border: ShapeBorder
     var hovered = false { didSet { needsDisplay = true } }
     private var tracking: NSTrackingArea?
-    init(tool: PaintTool, current: Bool, target: AnyObject, action: Selector) {
-        self.tool = tool; self.current = current
+    init(tool: PaintTool, current: Bool, paintMode: ShapePaintMode, corners: RectangleCorners, border: ShapeBorder, target: AnyObject, action: Selector) {
+        self.tool = tool; self.current = current; self.paintMode = paintMode; self.corners = corners; self.border = border
         super.init(frame: .zero)
         self.target = target; self.action = action; isBordered = false
         setAccessibilityLabel(tool.title); setAccessibilityValue(current ? "Current type" : "")
@@ -63,7 +66,7 @@ private final class ToolVariantButton: NSButton {
         }
         let font = NSFont.systemFont(ofSize: 12)
         if current { ("✓" as NSString).draw(at: NSPoint(x: 8, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.labelColor]) }
-        EditorIcon.draw(tool.icon, in: NSRect(x: 27, y: 8, width: 16, height: 16))
+        EditorIcon.draw(paintMode.icon(for: tool, corners: corners, border: border), in: NSRect(x: 27, y: 8, width: 16, height: 16))
         (tool.title as NSString).draw(at: NSPoint(x: 52, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.labelColor])
         (tool.key.uppercased() as NSString).draw(at: NSPoint(x: bounds.width - 20, y: 8), withAttributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
     }
@@ -75,6 +78,15 @@ final class ToolGroupButton: ToolButton {
     private static weak var activeFlyoutButton: ToolGroupButton?
     let group: ToolGroup
     private(set) var currentTool: PaintTool
+    var shapePaintMode: ShapePaintMode = .outline {
+        didSet { if oldValue != shapePaintMode { setCurrentTool(currentTool) } }
+    }
+    var rectangleCorners = RectangleCorners.square {
+        didSet { if oldValue != rectangleCorners { setCurrentTool(currentTool) } }
+    }
+    var shapeBorder = ShapeBorder.solid {
+        didSet { if oldValue != shapeBorder { setCurrentTool(currentTool) } }
+    }
     var onChoose: ((PaintTool) -> Void)?
     private(set) var flyout: NSPanel?
     private var rows: [ToolVariantButton] = []
@@ -97,10 +109,18 @@ final class ToolGroupButton: ToolButton {
     func setCurrentTool(_ tool: PaintTool) {
         guard group.tools.contains(tool) else { return }
         currentTool = tool
-        image = tool.icon
+        image = shapePaintMode.icon(for: tool, corners: rectangleCorners, border: shapeBorder)
         setAccessibilityLabel("\(group.title): \(tool.title)")
         setAccessibilityHelp("Hover to show tool types on the right. Click to select \(tool.title).")
-        toolTip = "\(group.title) · \(tool.title) (\(tool.key.uppercased())) · Hover or right-click for types"
+        var styles: [String] = []
+        if group == .shapes && tool != .line { styles.append(shapePaintMode.rawValue) }
+        if (tool == .rectangle || tool == .selection) && rectangleCorners.isStyled {
+            styles.append("\(rectangleCorners.style.rawValue) \(rectangleCorners.radius.formatted()) px")
+        }
+        if group == .shapes && (tool == .line || shapePaintMode.drawsOutline) && shapeBorder.style != .solid { styles.append(shapeBorder.style.rawValue) }
+        setAccessibilityValue(styles.joined(separator: ", "))
+        let style = styles.isEmpty ? "" : " · " + styles.joined(separator: " · ")
+        toolTip = "\(group.title) · \(tool.title) (\(tool.key.uppercased()))\(style) · Hover or right-click for types"
         needsDisplay = true
     }
     @objc private func activateCurrent() { onChoose?(currentTool) }
@@ -152,7 +172,8 @@ final class ToolGroupButton: ToolButton {
         content.onEnter = { [weak self] in self?.closing?.cancel() }
         content.onExit = { [weak self] in self?.scheduleDismissal() }
         rows = group.tools.enumerated().map { index, tool in
-            let row = ToolVariantButton(tool: tool, current: tool == currentTool, target: self, action: #selector(chooseRow(_:)))
+            let row = ToolVariantButton(tool: tool, current: tool == currentTool, paintMode: shapePaintMode,
+                                        corners: rectangleCorners, border: shapeBorder, target: self, action: #selector(chooseRow(_:)))
             row.frame = NSRect(x: 4, y: 4 + (2 - index) * 33, width: 206, height: 33)
             content.addSubview(row); return row
         }

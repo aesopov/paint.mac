@@ -21,8 +21,8 @@ final class ToolOptionsScrollView: NSScrollView {
         documentView?.frame = CGRect(x: 0, y: 0, width: max(contentSize.width, size.width + 40), height: contentSize.height)
         options.frame = CGRect(x: 20, y: (contentSize.height - size.height) / 2, width: size.width, height: size.height)
     }
-    func settingsChanged() {
-        contentView.scroll(to: .zero)
+    func settingsChanged(resetScroll: Bool = true) {
+        if resetScroll { contentView.scroll(to: .zero) }
         needsLayout = true
     }
 }

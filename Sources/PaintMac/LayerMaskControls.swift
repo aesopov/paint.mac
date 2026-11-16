@@ -44,6 +44,20 @@ enum LayerMaskCommand: String, CaseIterable {
     }
 }
 
+/// Keep Option's meaning from the beginning of the native click, including
+/// when the user releases the modifier before releasing the mouse button.
+final class LayerMaskAddButton: NSButton {
+    private var initialModifiers: NSEvent.ModifierFlags?
+    var optionClick: Bool {
+        (initialModifiers ?? NSApp.currentEvent?.modifierFlags ?? []).contains(.option)
+    }
+    override func mouseDown(with event: NSEvent) {
+        initialModifiers = event.modifierFlags
+        defer { initialModifiers = nil }
+        super.mouseDown(with: event)
+    }
+}
+
 final class LayerThumbnailButton: NSButton {
     private static let previewContext = ImageRenderer().context
     let layerID: UUID

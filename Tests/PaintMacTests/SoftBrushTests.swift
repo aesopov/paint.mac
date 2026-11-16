@@ -266,8 +266,12 @@ final class SoftBrushTests: XCTestCase {
                 let visible = [.brush, .eraser, .line, .rectangle, .ellipse].contains(tool)
                 XCTAssertEqual(slider.superview!.isHidden, !visible); XCTAssertEqual(editor.canvas.brushHardness, 0.25)
                 if visible { XCTAssertTrue(root.bounds.contains(slider.convert(slider.bounds, to: root))) }
-                let fill = try XCTUnwrap(views(root).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Fill shapes" })
-                if !fill.isHidden { XCTAssertTrue(root.bounds.contains(fill.convert(fill.bounds, to: root))) }
+                let style = try XCTUnwrap(views(root).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == "Shape paint style" })
+                if !style.isHidden {
+                    style.scrollToVisible(style.bounds); root.layoutSubtreeIfNeeded()
+                    let clip = try XCTUnwrap(style.enclosingScrollView?.contentView)
+                    XCTAssertTrue(clip.bounds.contains(style.convert(style.bounds, to: clip)))
+                }
                 if tool == .ellipse, let directory = ProcessInfo.processInfo.environment["PAINTMAC_SOFT_PREVIEW_DIR"] {
                     editor.window!.orderFront(nil); root.displayIfNeeded()
                     let bitmap = try XCTUnwrap(editor.canvas.snapshot(of: root))

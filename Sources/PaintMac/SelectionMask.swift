@@ -62,9 +62,8 @@ struct SelectionMask: Equatable {
         Self(storage: TileGrid(width: width, height: height, channels: 1, base: [255]), bounds: CGRect(x: 0, y: 0, width: width, height: height))
     }
 
-    static func rectangle(_ rect: CGRect, width: Int, height: Int) -> Self {
-        let path = CGPath(rect: rect, transform: nil)
-        return shape(path, width: width, height: height, antialias: false)
+    static func rectangle(_ rect: CGRect, width: Int, height: Int, corners: RectangleCorners = .square, antialias: Bool = false) -> Self {
+        shape(corners.path(in: rect), width: width, height: height, antialias: antialias)
     }
     static func ellipse(_ rect: CGRect, width: Int, height: Int, antialias: Bool = true) -> Self {
         shape(CGPath(ellipseIn: rect, transform: nil), width: width, height: height, antialias: antialias)

@@ -140,9 +140,12 @@ extension Raster {
     /// Copy blending replaces coverage instead of repeatedly accumulating it.
     /// This retains Quartz's accurate ellipse geometry and round joins, even
     /// for wide outlines, and avoids stamping hundreds of overlapping disks.
-    mutating func strokeSoftShape(in rect: CGRect, ellipse: Bool, size: Double, color: PixelColor,
+    /// Hard inside-filled shapes share this path to partition fill/outline
+    /// coverage without multiplying their shared antialiased outer edge.
+    mutating func strokeMaskedShape(in rect: CGRect, ellipse: Bool, size: Double, color: PixelColor,
                                   opacity: Double, clip: CGRect?, selection: SelectionMask?, antialias: Bool,
-                                  fillColor: PixelColor?, hardness: Double, alignment: ShapeOutlineAlignment = .center) {
+                                  fillColor: PixelColor?, hardness: Double, alignment: ShapeOutlineAlignment = .center,
+                                  corners: RectangleCorners = .square, border: ShapeBorder = .solid, sourcePath: CGPath? = nil) {
         let radius = max(0.5, size / 2) * alignment.strokeMultiplier
         let profile = BrushProfile(radius: radius, hardness: hardness, antialias: antialias)
         let expansion = alignment.expansion(for: size) + 1
@@ -150,7 +153,7 @@ extension Raster {
             .intersection(clip ?? bounds).intersection(selection?.bounds ?? bounds).integral.intersection(bounds)
         guard !region.isNull, !region.isEmpty else { return }
         let rw = Int(region.width), rh = Int(region.height)
-        let path = ellipse ? CGPath(ellipseIn: rect, transform: nil) : CGPath(rect: rect, transform: nil)
+        let path = sourcePath ?? (ellipse ? CGPath(ellipseIn: rect, transform: nil) : corners.path(in: rect))
         let outlinePath = ShapeOutlineAlignment.strokePath(path, rect: rect, ellipse: ellipse, width: radius * 2)
         func mask(fill: Bool) -> Data? {
             var data = Data(count: rw * rh)
@@ -162,15 +165,15 @@ extension Raster {
                 ctx.setBlendMode(.copy); ctx.setLineJoin(.round)
                 if fill { ctx.setFillColor(gray: 1, alpha: 1); ctx.addPath(path); ctx.fillPath() }
                 else {
-                    alignment.clipOutline(in: ctx, path: path, region: region, antialias: antialias)
+                    border.apply(to: ctx, width: radius * 2)
                     let softness = radius * (1 - profile.hardness)
-                    let steps = min(128, max(8, Int(ceil(softness * 2))))
+                    let steps = softness == 0 ? 1 : min(128, max(8, Int(ceil(softness * 2))))
                     for i in 0..<steps {
-                        let t = (Double(i) + 0.5) / Double(steps)
+                        let t = softness == 0 ? 1 : (Double(i) + 0.5) / Double(steps)
                         let width = 2 * (radius - softness * t)
                         ctx.setLineWidth(width)
                         ctx.setStrokeColor(gray: BrushProfile.ramp(t), alpha: 1)
-                        if alignment == .inside && width >= min(rect.width, rect.height) {
+                        if alignment == .inside && border.style == .solid && width >= min(rect.width, rect.height) {
                             ctx.setFillColor(gray: BrushProfile.ramp(t), alpha: 1)
                             ctx.addPath(path); ctx.fillPath()
                         } else { ctx.addPath(outlinePath); ctx.strokePath() }
@@ -181,20 +184,30 @@ extension Raster {
             return succeeded ? data : nil
         }
         guard let outline = mask(fill: false) else { return }
-        let fill = fillColor.flatMap { _ in mask(fill: true) }
+        let fill = fillColor != nil || alignment != .center ? mask(fill: true) : nil
         let depth = depth, strokeColors = color.components(in: format.profile), fillColors = (fillColor ?? .clear).components(in: format.profile)
+        let channels = Array(zip(strokeColors, fillColors))
         let ox = Int(region.minX), oy = Int(region.minY)
         editPixels(in: region) { raw, _ in
             let pixels = RGBSamples(raw: raw, depth: depth)
             for y in 0..<rh { for x in 0..<rw {
                 let m = y * rw + x, i = m * 4
-                let strokeAlpha = Double(outline[m]) / 255 * Double(color.a) / 255
-                let fillAlpha = Double(fill?[m] ?? 0) / 255 * Double(fillColor?.a ?? 0) / 255 * (1 - strokeAlpha)
+                let shapeCoverage = Double(fill?[m] ?? 0) / 255, rawStroke = Double(outline[m]) / 255
+                let strokeCoverage: Double, overlap: Double
+                switch alignment {
+                case .inside: strokeCoverage = min(rawStroke, shapeCoverage); overlap = strokeCoverage
+                case .outside: strokeCoverage = max(0, rawStroke - shapeCoverage); overlap = 0
+                case .center: strokeCoverage = rawStroke; overlap = min(rawStroke, shapeCoverage)
+                }
+                let strokeOpacity = Double(color.a) / 255
+                let strokeAlpha = strokeCoverage * strokeOpacity
+                // Coverage at a shared antialiased edge is correlated. Multiplying
+                // fill by (1 - strokeAlpha) leaks fill color around an opaque border.
+                let fillAlpha = max(0, shapeCoverage - overlap * strokeOpacity) * Double(fillColor?.a ?? 0) / 255
                 let alpha = strokeAlpha + fillAlpha
                 guard alpha > 0 else { continue }
                 let strength = opacity * Double(selection?.value(x: x + ox, y: y + oy) ?? 255) / 255
                 let applied = alpha * strength
-                let channels = Array(zip(strokeColors, fillColors))
                 for (c, values) in channels.enumerated() {
                     let source = (values.0 * strokeAlpha + values.1 * fillAlpha) * strength * pixels.maximum
                     pixels[i + c] = source + pixels[i + c] * (1 - applied)

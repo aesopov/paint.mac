@@ -49,10 +49,13 @@ extension SelectionMask {
 enum LayerMaskSource { case revealAll, hideAll, selection }
 
 extension PaintDocument {
-    func addLayerMask(_ source: LayerMaskSource) {
+    func addLayerMask(_ source: LayerMaskSource, finishingQuickMask: Bool = false) {
         finishPendingEdits?()
         guard state.activeLayer.mask == nil, source != .selection || state.selection != nil else { return }
         edit("Add Layer Mask") { state in
+            if finishingQuickMask, let quickMask = state.quickMask {
+                state.selection = quickMask; state.quickMask = nil
+            }
             let mask: SelectionMask
             switch source {
             case .revealAll: mask = .all(width: state.width, height: state.height)
