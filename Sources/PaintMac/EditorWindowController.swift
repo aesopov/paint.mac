@@ -96,8 +96,8 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let opacitySlider = NSSlider(value: 100, minValue: 1, maxValue: 100, target: nil, action: nil)
     private let opacityValue = label("100%", size: 11, color: .secondaryLabelColor)
     private let toleranceSlider = NSSlider(value: 32, minValue: 0, maxValue: 255, target: nil, action: nil)
-    private let colorWell = NSColorWell()
-    private let alternateColorWell = NSColorWell()
+    private let colorWell = SquareColorWell()
+    private let alternateColorWell = SquareColorWell()
     private let hexField = NSTextField(string: "#4075F5")
     private let alternateHexField = NSTextField(string: "#FFFFFF")
     private let layerTable = LayerTableView()
@@ -245,8 +245,29 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         let toolDocument = ToolRailView(frame: CGRect(x: 0, y: 0, width: 60, height: tools.count * 38 + 24))
         toolStack.translatesAutoresizingMaskIntoConstraints = false; toolDocument.addSubview(toolStack)
         toolScroll.documentView = toolDocument
+        // Keep the overlapping native color wells visible even when tools scroll.
+        let colorPair = ToolRailView()
+        colorPair.setAccessibilityLabel("Main and alternate colors")
+        colorPair.translatesAutoresizingMaskIntoConstraints = false; rail.addSubview(colorPair)
+        let swap = NSButton(image: NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Swap colors")!,
+                            target: self, action: #selector(swapColors))
+        swap.isBordered = false; swap.imageScaling = .scaleProportionallyDown
+        swap.contentTintColor = .secondaryLabelColor
+        swap.toolTip = "Swap Main and Alternate Colors (X)"; swap.setAccessibilityLabel("Swap main and alternate colors")
+        for control in [alternateColorWell, colorWell, swap] {
+            control.translatesAutoresizingMaskIntoConstraints = false; colorPair.addSubview(control)
+        }
+        NSLayoutConstraint.activate([
+            colorPair.widthAnchor.constraint(equalToConstant: 52), colorPair.heightAnchor.constraint(equalToConstant: 56),
+            colorPair.centerXAnchor.constraint(equalTo: rail.centerXAnchor), colorPair.bottomAnchor.constraint(equalTo: rail.bottomAnchor, constant: -12),
+            colorWell.leadingAnchor.constraint(equalTo: colorPair.leadingAnchor), colorWell.topAnchor.constraint(equalTo: colorPair.topAnchor, constant: 4),
+            alternateColorWell.leadingAnchor.constraint(equalTo: colorPair.leadingAnchor, constant: 18),
+            alternateColorWell.topAnchor.constraint(equalTo: colorPair.topAnchor, constant: 22),
+            swap.trailingAnchor.constraint(equalTo: colorPair.trailingAnchor), swap.topAnchor.constraint(equalTo: colorPair.topAnchor),
+            swap.widthAnchor.constraint(equalToConstant: 18), swap.heightAnchor.constraint(equalToConstant: 18)
+        ])
         toolScroll.translatesAutoresizingMaskIntoConstraints = false; rail.addSubview(toolScroll)
-        NSLayoutConstraint.activate([toolScroll.topAnchor.constraint(equalTo: rail.topAnchor), toolScroll.bottomAnchor.constraint(equalTo: rail.bottomAnchor),
+        NSLayoutConstraint.activate([toolScroll.topAnchor.constraint(equalTo: rail.topAnchor), toolScroll.bottomAnchor.constraint(equalTo: colorPair.topAnchor, constant: -10),
                                      toolScroll.leadingAnchor.constraint(equalTo: rail.leadingAnchor), toolScroll.trailingAnchor.constraint(equalTo: rail.trailingAnchor),
                                      toolStack.topAnchor.constraint(equalTo: toolDocument.topAnchor, constant: 14),
                                      toolStack.centerXAnchor.constraint(equalTo: toolDocument.centerXAnchor)])
@@ -348,24 +369,22 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
 
         for (well, field, alternate) in [(colorWell, hexField, false), (alternateColorWell, alternateHexField, true)] {
             well.color = (alternate ? canvas.alternateColor : canvas.color).nsColor
-            well.colorWellStyle = .minimal
+            well.colorWellStyle = .default
             well.target = self; well.action = #selector(colorChanged(_:))
-            well.widthAnchor.constraint(equalToConstant: 38).isActive = true
-            well.heightAnchor.constraint(equalToConstant: 30).isActive = true
+            well.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 32).isActive = true
+            well.toolTip = alternate ? "Alternate color · right mouse paints with this color. Click to edit." : "Main color · left mouse paints with this color. Click to edit."
             well.setAccessibilityLabel(alternate ? "Alternate color (right mouse)" : "Main color (left mouse)")
             field.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
             field.target = self; field.action = #selector(hexChanged(_:))
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
             field.setAccessibilityLabel(alternate ? "Alternate hex color" : "Main hex color")
         }
-        let swap = iconButton("arrow.triangle.2.circlepath", help: "Swap Main and Alternate Colors (X)", action: #selector(swapColors))
-        let mainColorRow = stack([colorWell, hexField, swap], vertical: false, spacing: 10)
-        let alternateColorRow = stack([alternateColorWell, alternateHexField], vertical: false, spacing: 10)
-        for row in [mainColorRow, alternateColorRow] { row.distribution = .fill }
         let colorRows = stack([
-            label("Main · left mouse", size: 10, color: .secondaryLabelColor), mainColorRow,
-            label("Alternate · right mouse", size: 10, color: .secondaryLabelColor), alternateColorRow
+            label("Main · left mouse", size: 10, color: .secondaryLabelColor), hexField,
+            label("Alternate · right mouse", size: 10, color: .secondaryLabelColor), alternateHexField
         ], spacing: 6)
+        for field in [hexField, alternateHexField] { field.widthAnchor.constraint(equalTo: colorRows.widthAnchor).isActive = true }
         let palette: [PixelColor] = [
             .init(r: 29, g: 32, b: 39), .init(r: 105, g: 112, b: 125), .init(r: 197, g: 202, b: 211), .white,
             .init(r: 255, g: 91, b: 107), .init(r: 255, g: 158, b: 79), .init(r: 250, g: 211, b: 92), .init(r: 177, g: 220, b: 98),
@@ -388,7 +407,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         toleranceSlider.setAccessibilityLabel("Fill tolerance")
         let colorSection = stack([sectionTitle("COLORS"), colorRows, stack(paletteRows, spacing: 2), toleranceRow], spacing: 14)
         colorSection.translatesAutoresizingMaskIntoConstraints = false; inspector.addSubview(colorSection)
-        for row in [colorRows, mainColorRow, alternateColorRow, toleranceRow] {
+        for row in [colorRows, toleranceRow] {
             row.widthAnchor.constraint(equalTo: colorSection.widthAnchor).isActive = true
         }
         NSLayoutConstraint.activate([colorSection.topAnchor.constraint(equalTo: inspector.topAnchor, constant: 20),

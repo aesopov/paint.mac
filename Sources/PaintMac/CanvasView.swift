@@ -187,6 +187,7 @@ final class CanvasView: NSView, NSEditor {
     private var isPanning = false
     private var gestureActive = false
     private var softBrushStroke: SoftBrushStroke?
+    private var hardBrushStroke: HardBrushStroke?
     private var retouchStroke: RetouchStroke?
     private var gestureHardness: Double = 1
     private var gestureRaster: Raster?
@@ -534,7 +535,10 @@ final class CanvasView: NSView, NSEditor {
             paintDocument.objectDidBeginEditing(self)
         }
         gestureHardness = BrushProfile(radius: 1, hardness: brushHardness, antialias: smooth).hardness
-        if gestureHardness < 1, tool == .brush || tool == .eraser { softBrushStroke = SoftBrushStroke(original: paintDocument.state.editingRaster) }
+        if tool == .brush || tool == .eraser {
+            if gestureHardness < 1 { softBrushStroke = SoftBrushStroke(original: paintDocument.state.editingRaster) }
+            else { hardBrushStroke = HardBrushStroke(original: paintDocument.state.editingRaster) }
+        }
         if tool.isRetouch {
             let kind: RetouchStroke.Kind = tool == .blur ? .blur : tool == .sharpen ? .sharpen : .smudge
             retouchStroke = RetouchStroke(kind: kind, size: brushSize, hardness: gestureHardness, strength: retouchStrength, antialias: smooth,
@@ -696,6 +700,9 @@ final class CanvasView: NSView, NSEditor {
             } else if softBrushStroke != nil, tool == .brush || tool == .eraser {
                 softBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
                                        opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth, hardness: gestureHardness)
+            } else if hardBrushStroke != nil, tool == .brush || tool == .eraser {
+                hardBrushStroke!.paint(on: &raster, from: a, to: b, size: brushSize, color: gestureColor,
+                                       opacity: brushOpacity, erase: tool == .eraser, selection: selection, antialias: smooth)
             } else if tool == .line {
                 raster.strokeLine(from: a, to: b, size: gesturePixelAligned ? gestureShapeSize : brushSize, color: gestureColor, opacity: brushOpacity,
                                   selection: selection, antialias: smooth, hardness: gestureHardness, border: gestureBorder)
@@ -723,14 +730,14 @@ final class CanvasView: NSView, NSEditor {
                 paintDocument.state = before; paintDocument.invalidate()
             } else { paintDocument.commit(before, name: tool.title) }
         }
-        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; hardBrushStroke = nil; retouchStroke = nil
     }
     private func cancelGesture() {
         let wasMoving = movePreview != nil
         defer { if wasMoving { paintDocument.objectDidEndEditing(self) } }
         movePreview = nil; movePreviewImage = nil; moveOffset = .zero
         let before = gestureState
-        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
+        gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; hardBrushStroke = nil; retouchStroke = nil
         gestureSelection = nil; gestureActive = false
         lassoPoints = []; textBoxPreview = nil; gestureTravel = 0
         if isPanning {
