@@ -156,21 +156,40 @@ final class RetouchTests: XCTestCase {
                 else { doc.state.quickMask = mask }
             }
             canvas.tool = tool; canvas.brushSize = 18; canvas.retouchStrength = 1; canvas.brushHardness = 1
+            canvas.smudgeLength = 0.7; canvas.smudgePreserveAlpha = true
             let a = CGPoint(x: 27.5, y: 24.5), b = CGPoint(x: 38.5, y: 24.5), before = doc.state
             doc.undoManager!.beginUndoGrouping()
             canvas.mouseDown(with: mouse(.leftMouseDown, a, canvas)); canvas.mouseDragged(with: mouse(.leftMouseDragged, b, canvas))
             let preview = doc.state
+            canvas.smudgeLength = 0; canvas.smudgePreserveAlpha = false
             canvas.mouseDragged(with: mouse(.leftMouseDragged, b, canvas)); XCTAssertEqual(doc.state, preview)
             canvas.mouseUp(with: mouse(.leftMouseUp, b, canvas)); doc.undoManager!.endUndoGrouping()
             XCTAssertNotEqual(doc.state, before); XCTAssertEqual(doc.state, preview)
             if target > 0 { XCTAssertEqual(doc.state.layers.map(\.raster), before.layers.map(\.raster)) }
             doc.undoManager!.undo(); XCTAssertEqual(doc.state, before); XCTAssertFalse(doc.undoManager!.canUndo)
+            canvas.smudgeLength = 0.7; canvas.smudgePreserveAlpha = true
             canvas.mouseDown(with: mouse(.leftMouseDown, a, canvas)); canvas.mouseDragged(with: mouse(.leftMouseDragged, b, canvas))
             canvas.rightMouseDown(with: mouse(.rightMouseDown, b, canvas))
             canvas.mouseUp(with: mouse(.leftMouseUp, b, canvas)); canvas.rightMouseUp(with: mouse(.rightMouseUp, b, canvas))
             XCTAssertEqual(doc.state, before); XCTAssertTrue(doc.undoManager!.canRedo)
             doc.undoManager!.redo(); XCTAssertEqual(doc.state, preview)
         } }
+    }
+    func testSmudgeCapturesSettingsUntilMouseUp() {
+        let (doc, canvas, window) = fixture(); defer { window.close(); doc.close() }
+        canvas.tool = .smudge; canvas.brushSize = 18; canvas.brushHardness = 0.4
+        canvas.retouchStrength = 0.6; canvas.smudgeLength = 0.65; canvas.smudgePreserveAlpha = true
+        var expected = doc.state.editingRaster
+        var reference = RetouchStroke(kind: .smudge, size: 18, hardness: 0.4, strength: 0.6, antialias: true,
+                                      smudgeLength: 0.65, preserveAlpha: true)
+        let a = CGPoint(x: 27.5, y: 24.5), b = CGPoint(x: 33.5, y: 24.5), c = CGPoint(x: 42.5, y: 24.5)
+        doc.undoManager!.beginUndoGrouping()
+        canvas.mouseDown(with: mouse(.leftMouseDown, a, canvas)); canvas.mouseDragged(with: mouse(.leftMouseDragged, b, canvas))
+        canvas.smudgeLength = 0; canvas.smudgePreserveAlpha = false; canvas.retouchStrength = 0
+        canvas.mouseDragged(with: mouse(.leftMouseDragged, c, canvas)); canvas.mouseUp(with: mouse(.leftMouseUp, c, canvas))
+        doc.undoManager!.endUndoGrouping()
+        for p in [a, b, c] { reference.paint(on: &expected, to: p, selection: nil) }
+        XCTAssertEqual(doc.state.editingRaster, expected)
     }
     func testRetouchFlyoutShortcutsStrengthAndLockedOrNonPixelTargets() throws {
         _ = NSApplication.shared
@@ -184,6 +203,8 @@ final class RetouchTests: XCTestCase {
         let group = try XCTUnwrap(views(root).compactMap { $0 as? ToolGroupButton }.first { $0.group == .retouch })
         let slider = try XCTUnwrap(views(root).compactMap { $0 as? NSSlider }.first { $0.accessibilityLabel() == "Retouch strength" })
         XCTAssertEqual(Set(PaintTool.allCases.map(\.key)).count, PaintTool.allCases.count)
+        let length = try XCTUnwrap(views(root).compactMap { $0 as? NSSlider }.first { $0.accessibilityLabel() == "Smudge length" })
+        let alpha = try XCTUnwrap(views(root).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Smudge preserve alpha" })
         let before = doc.state
         for tool in tools {
             let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: editor.window!.windowNumber,
@@ -193,6 +214,16 @@ final class RetouchTests: XCTestCase {
             XCTAssertFalse(slider.isHiddenOrHasHiddenAncestor); XCTAssertNotNil(tool.icon)
             slider.doubleValue = 25; _ = NSApp.sendAction(slider.action!, to: slider.target, from: slider)
             XCTAssertEqual(editor.canvas.retouchStrength, 0.25)
+            XCTAssertEqual(length.isHiddenOrHasHiddenAncestor, tool != .smudge)
+            XCTAssertEqual(alpha.isHiddenOrHasHiddenAncestor, tool != .smudge)
+            if tool == .smudge {
+                length.doubleValue = 75; _ = NSApp.sendAction(length.action!, to: length.target, from: length)
+                alpha.performClick(nil)
+                XCTAssertEqual(editor.canvas.smudgeLength, 0.75); XCTAssertTrue(editor.canvas.smudgePreserveAlpha)
+                XCTAssertTrue(editor.window!.firstResponder === editor.canvas)
+                editor.selectTool(.brush); editor.selectTool(.smudge)
+                XCTAssertEqual(length.doubleValue, 75); XCTAssertEqual(alpha.state, .on)
+            }
         }
         XCTAssertEqual(doc.state, before); XCTAssertFalse(doc.undoManager!.canUndo)
         doc.state.activeLayer.isLocked = true

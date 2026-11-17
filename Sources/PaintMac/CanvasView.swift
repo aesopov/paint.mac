@@ -77,7 +77,7 @@ enum PaintTool: String, CaseIterable {
         case .eraser: return "Drag to erase pixels on the selected layer."
         case .blur: return "Drag to soften detail in the selected image or mask. Strength controls buildup. [ and ] change size."
         case .sharpen: return "Drag to sharpen local detail in the selected image or mask. Strength controls buildup."
-        case .smudge: return "Drag to pull existing pixels along the brush path. Strength controls the pull; a click leaves pixels unchanged."
+        case .smudge: return "Drag to smear existing pixels. Strength controls application; Length controls color travel. Preserve Alpha locks transparency. A click only picks up pixels."
         case .selection, .ellipseSelect: return "Drag to select. Hold Option during drag for center origin; Control constrains. Before drag: ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
         case .lasso: return "Drag to select. ⇧ adds · ⌥ subtracts · ⇧⌥ intersects."
         case .move: return "Drag to move selected pixels, or the entire active layer."
@@ -94,9 +94,11 @@ enum PaintTool: String, CaseIterable {
 
 final class CanvasView: NSView, NSEditor {
     let paintDocument: PaintDocument
-    var tool: PaintTool = .brush { willSet { if newValue != tool { finishText() } } didSet { window?.invalidateCursorRects(for: self); overlays.needsDisplay = true } }
+    var tool: PaintTool = .brush { willSet { if newValue != tool { if movePreview != nil { finishGesture(); gestureActive = false }; finishText() } } didSet { window?.invalidateCursorRects(for: self); overlays.needsDisplay = true } }
     var brushSize: Double = 18
     var retouchStrength: Double = 0.5
+    var smudgeLength: Double = 0.5
+    var smudgePreserveAlpha = false
     var brushHardness: Double = 1
     var brushOpacity: Double = 1 { didSet { updateTextAppearance() } }
     var smooth = true { didSet { updateTextAppearance() } }
@@ -150,6 +152,7 @@ final class CanvasView: NSView, NSEditor {
     private(set) var textPreviewRaster: Raster?
     private var textPreviewImage: CIImage?
     var displayedImage: CIImage {
+        if let movePreviewImage { return movePreviewImage }
         let image = textPreviewImage ?? effectPreviewImage ?? paintDocument.compositeImage
         guard let mask = paintDocument.state.quickMask else { return image }
         let coverage = textEditsQuickMask ? textPreviewRaster.map { SelectionMask(editingRaster: $0) } ?? mask : mask
@@ -157,7 +160,7 @@ final class CanvasView: NSView, NSEditor {
     }
     /// CPU pixels are requested only for export, sampling, snapshots, or fallback.
     var displayedComposite: CGImage {
-        if paintDocument.state.isQuickMask || textPreviewImage != nil || effectPreviewImage != nil { return paintDocument.renderer.cgImage(displayedImage, format: paintDocument.state.format) }
+        if movePreviewImage != nil || paintDocument.state.isQuickMask || textPreviewImage != nil || effectPreviewImage != nil { return paintDocument.renderer.cgImage(displayedImage, format: paintDocument.state.format) }
         return paintDocument.composite
     }
     private var textColor = PixelColor.black
@@ -168,6 +171,9 @@ final class CanvasView: NSView, NSEditor {
     private var pan = CGPoint.zero
     private var gestureStart = CGPoint.zero
     private var lastPoint = CGPoint.zero
+    private var movePreview: MovePreview?
+    private var movePreviewImage: CIImage?
+    private var moveOffset = CGPoint.zero
     private var gestureState: DocumentState?
     private var gestureSelection: SelectionMask?
     private var gestureSelectionMode: SelectionMode = .replace
@@ -379,14 +385,20 @@ final class CanvasView: NSView, NSEditor {
             ctx.saveGState(); ctx.clip(to: rect)
             ctx.translateBy(x: rect.minX, y: rect.maxY); ctx.scaleBy(x: zoom, y: -zoom)
             if let selectionImage {
-                ctx.clip(to: selection.canvasBounds, mask: selectionImage)
+                let maskRect = selection.canvasBounds.offsetBy(dx: moveOffset.x, dy: -moveOffset.y)
                 ctx.setFillColor(NSColor.black.withAlphaComponent(0.18).cgColor)
+                if moveOffset != .zero {
+                    ctx.saveGState()
+                    ctx.addRect(selection.canvasBounds); ctx.addRect(maskRect); ctx.clip(using: .evenOdd)
+                    ctx.fill(selection.canvasBounds); ctx.restoreGState()
+                }
+                ctx.clip(to: maskRect, mask: selectionImage)
                 ctx.fill(selection.canvasBounds)
             }
             ctx.restoreGState()
             if let selectionOutline {
                 ctx.saveGState(); ctx.clip(to: rect)
-                ctx.translateBy(x: rect.minX, y: rect.minY); ctx.scaleBy(x: zoom, y: zoom)
+                ctx.translateBy(x: rect.minX + moveOffset.x * zoom, y: rect.minY + moveOffset.y * zoom); ctx.scaleBy(x: zoom, y: zoom)
                 ctx.setLineWidth(1 / zoom)
                 ctx.setStrokeColor(NSColor.white.cgColor); ctx.addPath(selectionOutline); ctx.strokePath()
                 ctx.setLineDash(phase: overlays.selectionDashPhase / zoom, lengths: [4 / zoom, 4 / zoom])
@@ -516,11 +528,17 @@ final class CanvasView: NSView, NSEditor {
         if tool == .text { textUsesAlternate = alternate; return }
         gestureState = before
         gestureRaster = paintDocument.state.editingRaster
+        if tool == .move {
+            movePreview = MovePreview(state: before, selection: gestureSelection)
+            moveOffset = .zero
+            paintDocument.objectDidBeginEditing(self)
+        }
         gestureHardness = BrushProfile(radius: 1, hardness: brushHardness, antialias: smooth).hardness
         if gestureHardness < 1, tool == .brush || tool == .eraser { softBrushStroke = SoftBrushStroke(original: paintDocument.state.editingRaster) }
         if tool.isRetouch {
             let kind: RetouchStroke.Kind = tool == .blur ? .blur : tool == .sharpen ? .sharpen : .smudge
-            retouchStroke = RetouchStroke(kind: kind, size: brushSize, hardness: gestureHardness, strength: retouchStrength, antialias: smooth)
+            retouchStroke = RetouchStroke(kind: kind, size: brushSize, hardness: gestureHardness, strength: retouchStrength, antialias: smooth,
+                                          smudgeLength: smudgeLength, preserveAlpha: smudgePreserveAlpha)
         }
         if gestureCreatedLayerID != nil { paintDocument.invalidate() }
         switch tool {
@@ -556,19 +574,30 @@ final class CanvasView: NSView, NSEditor {
             updateSelection(to: point, modifiers: event.modifierFlags)
             return
         }
-        guard let before = gestureState else { return }
+        guard gestureState != nil else { return }
         switch tool {
         case .brush, .eraser, .blur, .sharpen, .smudge:
             paint(from: lastPoint, to: point); lastPoint = point
         case .move:
-            let dx = Int((point.x - gestureStart.x).rounded()), dy = Int((point.y - gestureStart.y).rounded())
-            paintDocument.state.moveActive(from: before, dx: dx, dy: dy, selection: gestureSelection)
-            if let gestureSelection { selection = gestureSelection.translated(dx: dx, dy: dy) }
-            paintDocument.invalidate()
+            updateMovePreview(to: point)
         case .line, .rectangle, .ellipse:
             updateShape(to: point, modifiers: event.modifierFlags)
         default: break
         }
+    }
+
+    private func updateMovePreview(to point: CGPoint) {
+        let offset = CGPoint(x: (point.x - gestureStart.x).rounded(), y: (point.y - gestureStart.y).rounded())
+        guard offset != moveOffset, let movePreview else { return }
+        moveOffset = offset
+        movePreviewImage = movePreview.image(dx: Int(offset.x), dy: Int(offset.y), renderer: paintDocument.renderer)
+        needsDisplay = true
+    }
+
+    /// Explicit save/actions include a pending move, just as they include text.
+    func finishPendingEdits() {
+        if movePreview != nil { finishGesture(); gestureActive = false }
+        finishText()
     }
 
     private func updateShape(to point: CGPoint, modifiers: NSEvent.ModifierFlags) {
@@ -631,6 +660,9 @@ final class CanvasView: NSView, NSEditor {
                 if selection?.isEmpty == true && gestureSelectionMode == .replace { selection = nil }
             }
         }
+        if tool == .move, gestureActive {
+            updateMovePreview(to: toImage(convert(event.locationInWindow, from: nil)))
+        }
         if tool == .text, gestureActive {
             let point = toImage(convert(event.locationInWindow, from: nil))
             var rect = dragRect(to: point, square: false).integral
@@ -675,6 +707,15 @@ final class CanvasView: NSView, NSEditor {
         if invalidate { paintDocument.invalidate() }
     }
     private func finishGesture() {
+        let wasMoving = movePreview != nil
+        defer { if wasMoving { paintDocument.objectDidEndEditing(self) } }
+        if let before = gestureState, movePreview != nil {
+            let dx = Int(moveOffset.x), dy = Int(moveOffset.y)
+            movePreview = nil; movePreviewImage = nil; moveOffset = .zero
+            paintDocument.state.moveActive(from: before, dx: dx, dy: dy, selection: gestureSelection)
+            if let gestureSelection { selection = gestureSelection.translated(dx: dx, dy: dy) }
+            needsDisplay = true
+        }
         if let before = gestureState {
             if gestureCreatedLayerID == paintDocument.state.activeID, paintDocument.state.editingRaster == gestureRaster {
                 // An empty selection, zero opacity, or a shape click should
@@ -685,6 +726,9 @@ final class CanvasView: NSView, NSEditor {
         gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
     }
     private func cancelGesture() {
+        let wasMoving = movePreview != nil
+        defer { if wasMoving { paintDocument.objectDidEndEditing(self) } }
+        movePreview = nil; movePreviewImage = nil; moveOffset = .zero
         let before = gestureState
         gestureState = nil; gestureRaster = nil; gestureCreatedLayerID = nil; softBrushStroke = nil; retouchStroke = nil
         gestureSelection = nil; gestureActive = false
@@ -863,17 +907,20 @@ final class CanvasView: NSView, NSEditor {
         }
     }
 
-    // Register the draft with NSDocument so native save/close/quit recognize
-    // unapplied text, while periodic autosaving leaves the editor open.
-    func discardEditing() { finishText(apply: false) }
-    func commitEditing() -> Bool { finishText(); return true }
+    // Native save/close/quit recognize pending text and move previews; periodic
+    // autosaving leaves an in-progress interaction alone.
+    func discardEditing() {
+        if movePreview != nil { cancelGesture() }
+        finishText(apply: false)
+    }
+    func commitEditing() -> Bool { finishPendingEdits(); return true }
     func commitEditingWithoutPresentingError() throws {
         // Autosave must not unexpectedly rasterize text while the user types.
         // Explicit save and close finish the draft before reaching this path.
-        if textEditor != nil { throw NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError) }
+        if textEditor != nil || movePreview != nil { throw NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError) }
     }
     func commitEditing(withDelegate delegate: Any?, didCommit didCommitSelector: Selector?, contextInfo: UnsafeMutableRawPointer?) {
-        finishText()
+        finishPendingEdits()
         guard let target = delegate as? NSObject, let selector = didCommitSelector, target.responds(to: selector) else { return }
         typealias Callback = @convention(c) (AnyObject, Selector, AnyObject, Bool, UnsafeMutableRawPointer?) -> Void
         let callback = unsafeBitCast(target.method(for: selector), to: Callback.self)
@@ -906,6 +953,7 @@ final class CanvasView: NSView, NSEditor {
         if key == " " { spaceDown = true; window?.invalidateCursorRects(for: self); return }
         if event.keyCode == 53 {
             if textEditor != nil { finishText(apply: false); return }
+            if gestureActive && movePreview != nil { cancelGesture(); return }
             if gestureActive && tool.isSelection {
                 selection = gestureSelection; gestureState = nil; gestureActive = false; lassoPoints = []
             } else { changeSelection(nil, name: "Deselect") }

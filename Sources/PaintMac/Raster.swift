@@ -388,26 +388,10 @@ struct Raster: Equatable {
     }
 
     func translated(dx: Int, dy: Int, selection: CGRect?) -> Raster {
-        let area = (selection ?? bounds).integral.intersection(bounds)
-        var result = self
-        result.fill(color: .clear, rect: area)
-        guard !area.isNull, !area.isEmpty else { return result }
-        let source = bytes
-        var destination = result.bytes
-        destination.withUnsafeMutableBytes { raw in
-            source.withUnsafeBytes { old in
-                let dst = RGBSamples(raw: raw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: old), depth: depth)
-                for y in Int(area.minY)..<Int(area.maxY) { for x in Int(area.minX)..<Int(area.maxX) {
-                    let tx = x + dx, ty = y + dy
-                    guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
-                    let i = (y * width + x) * 4, j = (ty * width + tx) * 4
-                    let alpha = src[i + 3] / src.maximum
-                    for c in 0..<4 { dst[j + c] = src[i + c] + dst[j + c] * (1 - alpha) }
-                } }
-            }
-        }
-        result.bytes = destination
-        return result
+        guard dx != 0 || dy != 0 else { return self }
+        guard let selection else { return moved(dx: dx, dy: dy, selection: nil) }
+        let mask = SelectionMask.rectangle(selection.integral.intersection(bounds), width: width, height: height)
+        return moved(dx: dx, dy: dy, selection: mask)
     }
 
     /// Interpolate edited premultiplied pixels by mask coverage, preserving holes
@@ -453,22 +437,50 @@ struct Raster: Equatable {
 
     func moved(dx: Int, dy: Int, selection: SelectionMask?) -> Raster {
         guard dx != 0 || dy != 0 else { return self }
-        guard let selection else { return translated(dx: dx, dy: dy, selection: nil) }
-        guard !selection.isEmpty else { return self }
+        if selection?.isEmpty == true { return self }
+        let area = (selection?.bounds ?? bounds).integral.intersection(bounds)
+        guard !area.isEmpty, !area.isNull else { return self }
+        let source = storage.read(area), mask = selection?.storage.read(area)
+        let rw = Int(area.width)
         var result = self
-        result.erase(selection: selection)
-        let source = masked(using: selection)
-        let area = selection.bounds
-        result.bytes.withUnsafeMutableBytes { dstRaw in
-            source.bytes.withUnsafeBytes { srcRaw in
-                let dst = RGBSamples(raw: dstRaw, depth: depth), src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: srcRaw), depth: depth)
-                for y in Int(area.minY)..<Int(area.maxY) {
-                    for x in Int(area.minX)..<Int(area.maxX) {
-                        let tx = x + dx, ty = y + dy
-                        guard tx >= 0, tx < width, ty >= 0, ty < height else { continue }
-                        let i = (y * width + x) * 4, j = (ty * width + tx) * 4, a = src[i + 3] / src.maximum
-                        for c in 0..<4 { dst[j + c] = src[i + c] + dst[j + c] * (1 - a) }
+        // Cut only the selected source tiles. Read from the immutable starting
+        // raster so overlapping destinations never feed back into the source.
+        if let mask {
+            result.storage.edit(in: area) { data, _ in
+                data.withUnsafeMutableBytes { raw in
+                    let dst = RGBSamples(raw: raw, depth: depth)
+                    mask.withUnsafeBytes { coverage in
+                        let p = coverage.bindMemory(to: UInt8.self)
+                        for i in 0..<p.count where p[i] > 0 {
+                            for c in 0..<4 { dst[i * 4 + c] = dst[i * 4 + c] * Double(255 - Int(p[i])) / 255 }
+                        }
                     }
+                }
+            }
+        } else { result.fill(color: .clear) }
+        let target = area.offsetBy(dx: CGFloat(dx), dy: CGFloat(dy)).intersection(bounds)
+        guard !target.isNull, !target.isEmpty else { return result }
+        result.storage.edit(in: target) { data, region in
+            data.withUnsafeMutableBytes { raw in
+                source.withUnsafeBytes { old in
+                    let dst = RGBSamples(raw: raw, depth: depth)
+                    let src = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: old), depth: depth)
+                    func composite(_ coverage: UnsafeBufferPointer<UInt8>?) {
+                        for y in 0..<Int(region.height) { for x in 0..<Int(region.width) {
+                            let sx = x + Int(region.minX) - dx - Int(area.minX)
+                            let sy = y + Int(region.minY) - dy - Int(area.minY)
+                            let i = sy * rw + sx, j = (y * Int(region.width) + x) * 4
+                            let amount = Int(coverage?[i] ?? 255)
+                            if amount == 0 { continue }
+                            let alpha = (src[i * 4 + 3] * Double(amount) / 255).rounded() / src.maximum
+                            for c in 0..<4 {
+                                let lifted = (src[i * 4 + c] * Double(amount) / 255).rounded()
+                                dst[j + c] = lifted + dst[j + c] * (1 - alpha)
+                            }
+                        } }
+                    }
+                    if let mask { mask.withUnsafeBytes { composite($0.bindMemory(to: UInt8.self)) } }
+                    else { composite(nil) }
                 }
             }
         }
@@ -577,7 +589,7 @@ final class ImageRenderer {
     private func masked(_ image: CIImage, using mask: SelectionMask) -> CIImage {
         image.applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: coverageImage(mask, opacity: 1, bounds: image.extent)])
     }
-    private func adjusted(_ image: CIImage, layer: PaintLayer, bounds: CGRect, clipped: Bool) -> CIImage {
+    private func adjusted(_ image: CIImage, layer: PaintLayer, bounds: CGRect, clipped: Bool, maskOverride: CIImage? = nil) -> CIImage {
         guard layer.visible, layer.opacity > 0, let effect = layer.effect else { return image }
         var filtered = effect.filtered(image, bounds: bounds)
         if clipped {
@@ -586,7 +598,7 @@ final class ImageRenderer {
             filtered = filtered.applyingFilter("CIColorMatrix", parameters: ["inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0), "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)])
                 .applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: image])
         }
-        let mask = coverageImage(layer.maskEnabled ? layer.mask : nil, opacity: layer.opacity, bounds: bounds)
+        let mask = layer.maskEnabled && maskOverride != nil ? opacity(maskOverride!, layer.opacity) : coverageImage(layer.maskEnabled ? layer.mask : nil, opacity: layer.opacity, bounds: bounds)
         return filtered.applyingFilter("CIBlendWithAlphaMask", parameters: [kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: mask]).cropped(to: bounds)
     }
     private struct LayerImages {
@@ -594,29 +606,31 @@ final class ImageRenderer {
         let bounds: CGRect
         let nodes: [UUID: PaintLayer]
         let children: [UUID?: [PaintLayer]]
+        let rasterOverrides: [UUID: CIImage]
+        let maskOverrides: [UUID: CIImage]
         var clear: CIImage { CIImage(color: .clear).cropped(to: bounds) }
-        init(renderer: ImageRenderer, layers: [PaintLayer], bounds: CGRect) {
+        init(renderer: ImageRenderer, layers: [PaintLayer], bounds: CGRect, rasterOverrides: [UUID: CIImage] = [:], maskOverrides: [UUID: CIImage] = [:]) {
+            self.rasterOverrides = rasterOverrides; self.maskOverrides = maskOverrides
             self.renderer = renderer; self.bounds = bounds
             nodes = Dictionary(uniqueKeysWithValues: layers.map { ($0.id, $0) })
             children = Dictionary(grouping: layers, by: \.parentID)
         }
         func content(_ id: UUID) -> CIImage {
             guard let node = nodes[id] else { return clear }
-            if !node.isGroup {
-                let image = node.raster.ciImage
-                return node.maskEnabled ? node.mask.map { renderer.masked(image, using: $0) } ?? image : image
+            let image = node.isGroup ? siblings(id) : (rasterOverrides[id] ?? node.raster.ciImage)
+            if node.maskEnabled, let mask = maskOverrides[id] ?? node.mask?.storage.ciImage {
+                return image.applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: mask])
             }
-            let image = siblings(id)
-            if node.maskEnabled, let mask = node.mask { return renderer.masked(image, using: mask) }
             return image
         }
+
         func siblings(_ parent: UUID?) -> CIImage {
             let list = children[parent] ?? []
             var result = clear, index = 0
             while index < list.count {
                 let base = list[index]
                 if base.effect != nil {
-                    result = renderer.adjusted(result, layer: base, bounds: bounds, clipped: false)
+                    result = renderer.adjusted(result, layer: base, bounds: bounds, clipped: false, maskOverride: maskOverrides[base.id])
                     index += 1; continue
                 }
                 // A clipping stack is one isolated composite. Source-atop keeps
@@ -626,7 +640,7 @@ final class ImageRenderer {
                 while index < list.count, list[index].isClipped {
                     let upper = list[index]
                     if upper.visible && upper.opacity > 0 {
-                        if upper.effect != nil { chain = renderer.adjusted(chain, layer: upper, bounds: bounds, clipped: true) }
+                        if upper.effect != nil { chain = renderer.adjusted(chain, layer: upper, bounds: bounds, clipped: true, maskOverride: maskOverrides[upper.id]) }
                         else { chain = renderer.opacity(content(upper.id), upper.opacity).applyingFilter("CISourceAtopCompositing", parameters: [kCIInputBackgroundImageKey: chain]) }
                     }
                     index += 1
@@ -643,9 +657,10 @@ final class ImageRenderer {
     }
     /// Keep the compositing graph on the GPU path until an export or CPU pixel
     /// operation explicitly needs a CGImage. The canvas renders this graph directly.
-    func compositeImage(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false) -> CIImage {
+    func compositeImage(_ layers: [PaintLayer], width: Int, height: Int, whiteBackground: Bool = false,
+                        rasterOverrides: [UUID: CIImage] = [:], maskOverrides: [UUID: CIImage] = [:]) -> CIImage {
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        var image = LayerImages(renderer: self, layers: layers, bounds: bounds).siblings(nil)
+        var image = LayerImages(renderer: self, layers: layers, bounds: bounds, rasterOverrides: rasterOverrides, maskOverrides: maskOverrides).siblings(nil)
         if whiteBackground { image = image.composited(over: CIImage(color: .white).cropped(to: bounds)) }
         return image
     }

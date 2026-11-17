@@ -114,17 +114,13 @@ struct SelectionMask: Equatable {
     }
     func translated(dx: Int, dy: Int, width newWidth: Int? = nil, height newHeight: Int? = nil) -> Self {
         let w = newWidth ?? width, h = newHeight ?? height
-        var result = Data(count: w * h)
-        let startX = max(0, -dx), endX = min(width, w - dx)
-        let startY = max(0, -dy), endY = min(height, h - dy)
-        let coverage = self.coverage
-        if startX < endX && startY < endY {
-            for y in startY..<endY {
-                let source = y * width + startX, target = (y + dy) * w + startX + dx
-                result.replaceSubrange(target..<target + endX - startX, with: coverage[source..<source + endX - startX])
-            }
-        }
-        return Self(width: w, height: h, coverage: result)
+        if dx == 0 && dy == 0 && w == width && h == height { return self }
+        var grid = TileGrid(width: w, height: h, channels: 1)
+        guard !isEmpty else { return Self(storage: grid, bounds: .null) }
+        let target = bounds.offsetBy(dx: CGFloat(dx), dy: CGFloat(dy)).intersection(grid.bounds)
+        guard !target.isEmpty, !target.isNull else { return Self(storage: grid, bounds: .null) }
+        grid.write(storage.read(target.offsetBy(dx: -CGFloat(dx), dy: -CGFloat(dy))), in: target)
+        return Self(storage: grid, bounds: grid.nonzeroBounds)
     }
 
     func scaled(width newWidth: Int, height newHeight: Int, smooth: Bool) -> Self {

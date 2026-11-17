@@ -11,21 +11,22 @@ struct RetouchStroke {
     let antialias: Bool
     private var lastPoint: CGPoint?
     private var distanceToNext = 0.0
-    private var carried: [Float]?
-    private var carrySide = 0
+    private var smudge: SmudgeBrush?
 
-    init(kind: Kind, size: Double, hardness: Double, strength: Double, antialias: Bool) {
+    init(kind: Kind, size: Double, hardness: Double, strength: Double, antialias: Bool, smudgeLength: Double = 0.5, preserveAlpha: Bool = false) {
         self.kind = kind; self.size = max(1, min(300, size))
         self.hardness = hardness; self.strength = max(0, min(1, strength)); self.antialias = antialias
+        if kind == .smudge {
+            smudge = SmudgeBrush(size: self.size, hardness: hardness, antialias: antialias, length: smudgeLength, preserveAlpha: preserveAlpha)
+        }
     }
     mutating func paint(on raster: inout Raster, to point: CGPoint, selection: SelectionMask?) {
         let point = antialias ? point : CGPoint(x: floor(point.x) + 0.5, y: floor(point.y) + 0.5)
-        let spacing = max(0.5, size * 0.15)
+        let spacing = max(0.5, size * (kind == .smudge ? 0.05 : 0.15))
         guard let start = lastPoint else {
             lastPoint = point; distanceToNext = spacing
             if kind == .smudge {
-                carrySide = Int(ceil(size)) + 2
-                carried = pickup(raster, center: point)
+                if strength > 0 { smudge!.pickUp(raster, at: point) }
             } else { dab(on: &raster, at: point, spacing: spacing, selection: selection) }
             return
         }
@@ -39,19 +40,12 @@ struct RetouchStroke {
         }
         distanceToNext = distance - length; lastPoint = point
     }
-    private func pickup(_ raster: Raster, center: CGPoint) -> [Float] {
-        let origin = CGPoint(x: center.x - Double(carrySide) / 2, y: center.y - Double(carrySide) / 2)
-        let patch = Patch(raster, region: CGRect(origin: origin, size: CGSize(width: carrySide, height: carrySide)).insetBy(dx: -1, dy: -1))
-        var result = [Float](repeating: 0, count: carrySide * carrySide * 4)
-        for y in 0..<carrySide { for x in 0..<carrySide {
-            let px = origin.x + Double(x) + 0.5, py = origin.y + Double(y) + 0.5
-            guard raster.bounds.contains(CGPoint(x: px, y: py)) else { continue }
-            for c in 0..<4 { result[(y * carrySide + x) * 4 + c] = patch.sample(x: px - 0.5, y: py - 0.5, channel: c) }
-        } }
-        return result
-    }
     private mutating func dab(on raster: inout Raster, at center: CGPoint, spacing: Double, selection: SelectionMask?) {
         guard strength > 0 else { return }
+        if kind == .smudge {
+            smudge!.dab(on: &raster, at: center, distance: spacing, strength: strength, selection: selection)
+            return
+        }
         let radius = size / 2
         let area = CGRect(x: center.x - radius - 1, y: center.y - radius - 1, width: size + 2, height: size + 2)
             .integral.intersection(raster.bounds).intersection(selection?.bounds ?? raster.bounds)
@@ -59,10 +53,10 @@ struct RetouchStroke {
         let kernel = max(1, Int(ceil(size / 24)))
         let patch = Patch(raster, region: area.insetBy(dx: -CGFloat(kernel * 3), dy: -CGFloat(kernel * 3)))
         guard patch.width > 0, patch.height > 0 else { return }
-        let filtered = kind == .smudge ? [] : Self.blurred(patch.values, width: patch.width, height: patch.height, radius: kernel)
+        let filtered = Self.blurred(patch.values, width: patch.width, height: patch.height, radius: kernel)
         let profile = BrushProfile(radius: radius, hardness: hardness, antialias: antialias)
         let flow = Float(1 - pow(1 - strength, spacing / (size * 0.25)))
-        let payload = carried, side = carrySide, kind = kind, depth = raster.depth
+        let kind = kind, depth = raster.depth
         raster.editPixels(in: area, selection: selection) { raw, region in
             let pixels = RGBSamples(raw: raw, depth: depth), rw = Int(region.width)
             for y in 0..<Int(region.height) { for x in 0..<rw {
@@ -72,20 +66,11 @@ struct RetouchStroke {
                 let src = ((Int(py) - patch.y) * patch.width + Int(px) - patch.x) * 4
                 let i = (y * rw + x) * 4
                 let alpha = patch.values[src + 3]
-                let targetAlpha: Float
-                if kind == .smudge, let payload {
-                    targetAlpha = Patch.interpolate(payload, width: side, height: side,
-                                                    x: px - center.x + Double(side) / 2 - 0.5,
-                                                    y: py - center.y + Double(side) / 2 - 0.5, channel: 3)
-                } else { targetAlpha = kind == .sharpen ? alpha : max(0, min(1, filtered[src + 3])) }
+                let targetAlpha = kind == .sharpen ? alpha : max(0, min(1, filtered[src + 3]))
                 let appliedAlpha = max(0, min(1, alpha + (targetAlpha - alpha) * weight))
                 for c in 0..<4 {
                     let target: Float
-                    if kind == .smudge, let payload {
-                        target = Patch.interpolate(payload, width: side, height: side,
-                                                   x: px - center.x + Double(side) / 2 - 0.5,
-                                                   y: py - center.y + Double(side) / 2 - 0.5, channel: c)
-                    } else if kind == .sharpen {
+                    if kind == .sharpen {
                         if c == 3 { target = alpha }
                         else {
                             let blurredAlpha = filtered[src + 3]
@@ -97,10 +82,6 @@ struct RetouchStroke {
                     pixels[i + c] = Double(value) * pixels.maximum
                 }
             } }
-        }
-        if kind == .smudge, let carried {
-            let fresh = pickup(raster, center: center), pickupRate: Float = 0.15
-            self.carried = zip(carried, fresh).map { $0 + ($1 - $0) * pickupRate }
         }
     }
     /// Three separable box passes approximate a Gaussian in bounded scratch
@@ -145,17 +126,6 @@ struct RetouchStroke {
                 let p = RGBSamples(raw: UnsafeMutableRawBufferPointer(mutating: raw), depth: depth)
                 return (0..<count).map { Float(p[$0] / p.maximum) }
             }
-        }
-        func sample(x px: Double, y py: Double, channel: Int) -> Float {
-            Self.interpolate(values, width: width, height: height, x: px - Double(x), y: py - Double(y), channel: channel)
-        }
-        static func interpolate(_ values: [Float], width: Int, height: Int, x: Double, y: Double, channel: Int) -> Float {
-            guard width > 0, height > 0 else { return 0 }
-            let x0 = Int(floor(x)), y0 = Int(floor(y)), fx = Float(x - floor(x)), fy = Float(y - floor(y))
-            func at(_ x: Int, _ y: Int) -> Float { values[(max(0, min(height - 1, y)) * width + max(0, min(width - 1, x))) * 4 + channel] }
-            let a = at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx
-            let b = at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx
-            return a * (1 - fy) + b * fy
         }
     }
 }

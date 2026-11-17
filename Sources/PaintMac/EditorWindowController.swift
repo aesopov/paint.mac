@@ -87,6 +87,10 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     private let strengthSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
     private let strengthValue = label("50%", size: 11, color: .secondaryLabelColor)
     private var strengthOptions: NSStackView!
+    private let smudgeLengthSlider = NSSlider(value: 50, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let smudgeLengthValue = label("50%", size: 11, color: .secondaryLabelColor)
+    private let preserveAlphaButton = NSButton(checkboxWithTitle: "Preserve Alpha", target: nil, action: nil)
+    private var smudgeOptions: NSStackView!
     private let sizeValue = label("18 px", size: 11, color: .secondaryLabelColor)
     private let sizeSlider = NSSlider(value: 18, minValue: 1, maxValue: 300, target: nil, action: nil)
     private let opacitySlider = NSSlider(value: 100, minValue: 1, maxValue: 100, target: nil, action: nil)
@@ -169,7 +173,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         canvas.onShapePaintModeChange = { [weak self] in self?.updateShapeControls() }
         canvas.onColorPick = { [weak self] color, alternate in self?.setColor(color, alternate: alternate) }
         canvas.onSwapColors = { [weak self] in self?.swapColors() }
-        document.finishPendingEdits = { [weak canvas] in canvas?.finishText() }
+        document.finishPendingEdits = { [weak canvas] in canvas?.finishPendingEdits() }
         canvas.onStatus = { [weak self] in self?.status.stringValue = $0 }
         canvas.onSizeChange = { [weak self] size in self?.sizeSlider.doubleValue = size; self?.updateBrushControls() }
         canvas.onZoomChange = { [weak self] in self?.refreshZoom() }
@@ -255,6 +259,16 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         strengthSlider.setAccessibilityLabel("Retouch strength")
         strengthSlider.toolTip = "Strength of Blur, Sharpen, and Smudge. Repeated passes build the effect."
         strengthValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
+        smudgeLengthSlider.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        smudgeLengthSlider.target = self; smudgeLengthSlider.action = #selector(smudgeSettingsChanged); smudgeLengthSlider.isContinuous = true
+        smudgeLengthSlider.setAccessibilityLabel("Smudge length")
+        smudgeLengthSlider.toolTip = "How far picked-up color travels. 0%: no smearing; lower values pick up new pixels faster; 100%: retain the initial pickup. Independent of Strength."
+        smudgeLengthValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
+        preserveAlphaButton.target = self; preserveAlphaButton.action = #selector(smudgeSettingsChanged)
+        preserveAlphaButton.setAccessibilityLabel("Smudge preserve alpha")
+        preserveAlphaButton.toolTip = "Keep each pixel's existing transparency. Smear color only; transparent pixels stay transparent."
+        smudgeOptions = stack([label("Length", size: 11, color: .secondaryLabelColor), smudgeLengthSlider,
+                               smudgeLengthValue, preserveAlphaButton], vertical: false, spacing: 6)
         hardnessOptions = stack([label("Hardness", size: 11, color: .secondaryLabelColor), hardnessSlider, hardnessValue], vertical: false, spacing: 6)
         hardnessSlider.widthAnchor.constraint(equalToConstant: 70).isActive = true
         hardnessValue.widthAnchor.constraint(equalToConstant: 34).isActive = true
@@ -316,7 +330,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         shapeAlignmentPopup.setAccessibilityLabel("Shape outline alignment")
         shapeAlignmentPopup.toolTip = "Inside: dragged boundary is the outer edge. Center: boundary is the stroke center. Outside: boundary is the inner edge."
         shapeAlignmentOptions = stack([label("Outline", size: 11, color: .secondaryLabelColor), shapeAlignmentPopup], vertical: false, spacing: 6)
-        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, strengthOptions, hardnessOptions, edgeMode, pixelAlignment, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
+        let optionStack = stack([toolTitle, separator(), brushOptions, selectionOptions, textOptions, opacityOptions, strengthOptions, smudgeOptions, hardnessOptions, edgeMode, pixelAlignment, shapeStylePopup, cornerOptions, borderOptions, shapeAlignmentOptions], vertical: false, spacing: 10)
         toolOptionsScroll = ToolOptionsScrollView(options: optionStack)
         toolOptionsScroll.translatesAutoresizingMaskIntoConstraints = false; options.addSubview(toolOptionsScroll)
         toolTitle.widthAnchor.constraint(equalToConstant: 96).isActive = true
@@ -618,6 +632,7 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
         textOptions.isHidden = tool != .text
         opacityOptions.isHidden = !tool.isPainting
         strengthOptions.isHidden = !tool.isRetouch
+        smudgeOptions.isHidden = tool != .smudge
         hardnessOptions.isHidden = !(tool.isBrush || tool.isGeometry)
         edgeMode.isHidden = !(tool.isPainting || tool.isSelection || tool.isRetouch)
         updateShapeControls()
@@ -927,6 +942,11 @@ final class EditorWindowController: NSWindowController, NSToolbarDelegate, NSTab
     @objc private func strengthChanged() {
         canvas.retouchStrength = strengthSlider.doubleValue / 100
         strengthValue.stringValue = "\(Int(strengthSlider.doubleValue.rounded()))%"
+    }
+    @objc private func smudgeSettingsChanged() {
+        canvas.smudgeLength = smudgeLengthSlider.doubleValue / 100
+        canvas.smudgePreserveAlpha = preserveAlphaButton.state == .on
+        smudgeLengthValue.stringValue = "\(Int(smudgeLengthSlider.doubleValue.rounded()))%"
     }
     @objc private func toleranceChanged() { canvas.tolerance = toleranceSlider.integerValue }
     @objc private func colorChanged(_ sender: NSColorWell) { setColor(PixelColor(sender.color), alternate: sender === alternateColorWell) }

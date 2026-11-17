@@ -126,6 +126,10 @@ final class EditorRegressionTests: XCTestCase {
                     }
                     send(rightFirst, 0, 20); send(rightFirst, 1)
                     if tool == .hand { XCTAssertNotEqual(canvas.imageRect, imageRect) }
+                    else if tool == .move {
+                        XCTAssertEqual(document.state, original, "Move pixels remain immutable until mouse-up")
+                        XCTAssertNotEqual(try Raster(image: canvas.displayedComposite), composite, "Expected a live move preview")
+                    }
                     else if tool != .text { XCTAssertNotEqual(document.state, original, "Expected a live \(tool) preview") }
                     send(!rightFirst, 0)
                     XCTAssertEqual(document.state, original, "Cancel \(tool), right first: \(rightFirst)")

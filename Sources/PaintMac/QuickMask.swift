@@ -5,11 +5,13 @@ import CoreImage
 /// used for exports, thumbnails, or project pixels.
 enum QuickMaskOverlay {
     static func image(_ mask: SelectionMask, over image: CIImage) -> CIImage {
-        let bounds = mask.canvasBounds
+        Self.image(coverage: mask.storage.ciImage, bounds: mask.canvasBounds, over: image)
+    }
+    static func image(coverage: CIImage, bounds: CGRect, over image: CIImage) -> CIImage {
         let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0, alpha: 0.45)).cropped(to: bounds)
         let clear = CIImage(color: .clear).cropped(to: bounds)
         return red.applyingFilter("CIBlendWithAlphaMask", parameters: [
-            kCIInputBackgroundImageKey: clear, kCIInputMaskImageKey: mask.storage.ciImage
+            kCIInputBackgroundImageKey: clear, kCIInputMaskImageKey: coverage
         ]).composited(over: image)
     }
 }
